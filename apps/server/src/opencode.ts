@@ -2,7 +2,15 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { join } from "node:path";
-import { createOpencodeClient, type Event, type OpencodeClient } from "@opencode-ai/sdk";
+import {
+  createOpencodeClient,
+  type Event,
+  type GlobalEvent,
+  type OpencodeClient,
+  type Provider,
+  type Session,
+} from "@opencode-ai/sdk";
+import type { AgentModel, ModelRef, ModelsResponse } from "@nautilus/types";
 import type { Logger } from "./logger";
 export type { Event } from "@opencode-ai/sdk";
 
@@ -13,6 +21,19 @@ export type OpenCodeEvent = {
 
 export type OpenCodeService = {
   start: () => Promise<void>;
+  createSession: (directory: string, title: string) => Promise<Session>;
+  prompt: (sessionId: string, directory: string, text: string, model?: ModelRef) => Promise<void>;
+  listModels: () => Promise<ModelsResponse>;
+
+  respondToPermission: (
+    requestId: string,
+    response: "once" | "always" | "reject",
+    directory: string,
+  ) => Promise<void>;
+  abort: (sessionId: string) => Promise<void>;
+
+  parentSessionId: (sessionId: string) => Promise<string | null>;
+  events: () => AsyncGenerator<OpenCodeEvent>;
   close: () => Promise<void>;
 };
 
@@ -184,6 +205,115 @@ export class OpenCodeProcess implements OpenCodeService {
     throw new Error("Timed out waiting for OpenCode to become ready");
   }
 
+  private async clientOrStart(): Promise<OpencodeClient> {
+    if (!this.client) await this.start();
+    if (!this.client) throw new Error("OpenCode is not started");
+    return this.client;
+  }
+
+  async createSession(directory: string, title: string): Promise<Session> {
+    const client = await this.clientOrStart();
+
+    return (await client.session.create({
+      body: { title },
+      query: { directory },
+    })) as unknown as Session;
+  }
+
+  async prompt(
+    sessionId: string,
+    directory: string,
+    text: string,
+    model?: ModelRef,
+  ): Promise<void> {
+    const client = await this.clientOrStart();
+    await client.session.promptAsync({
+      path: { id: sessionId },
+      body: {
+        parts: [{ type: "text", text }],
+
+        ...(model ? { model: { providerID: model.providerId, modelID: model.modelId } } : {}),
+
+        ...(model?.variant ? { variant: model.variant } : {}),
+      },
+      query: { directory },
+    });
+  }
+
+  async listModels(): Promise<ModelsResponse> {
+    const client = await this.clientOrStart();
+
+    const [catalog, config] = (await Promise.all([
+      client.config.providers(),
+      client.config.get(),
+    ])) as unknown as [{ providers: Array<Provider> }, { model?: string }];
+    const models: AgentModel[] = [];
+    for (const provider of catalog.providers) {
+      for (const model of Object.values(provider.models)) {
+        if (model.status === "deprecated") continue;
+        models.push({
+          providerId: provider.id,
+          modelId: model.id,
+          name: model.name || model.id,
+          providerName: provider.name || provider.id,
+          isReasoning: model.capabilities.reasoning,
+          contextLimit: model.limit.context > 0 ? model.limit.context : null,
+
+          variants: Object.keys((model as { variants?: Record<string, unknown> }).variants ?? {}),
+        });
+      }
+    }
+    return { models, default: parseModelRef(config.model) };
+  }
+
+  async respondToPermission(
+    requestId: string,
+    response: "once" | "always" | "reject",
+    directory: string,
+  ): Promise<void> {
+    await this.clientOrStart();
+
+    const url = new URL(
+      `/permission/${encodeURIComponent(requestId)}/reply`,
+      `http://${this.host}:${String(this.port)}`,
+    );
+    url.searchParams.set("directory", directory);
+    const result = await boundedFetch(
+      new Request(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ reply: response }),
+      }),
+    );
+    if (!result.ok) throw new Error(`permission_reply_failed:${String(result.status)}`);
+  }
+
+  async abort(sessionId: string): Promise<void> {
+    const client = await this.clientOrStart();
+    await client.session.abort({ path: { id: sessionId } });
+  }
+
+  async parentSessionId(sessionId: string): Promise<string | null> {
+    const client = await this.clientOrStart();
+    const session = (await client.session.get({
+      path: { id: sessionId },
+    })) as unknown as Session;
+    return session.parentID ?? null;
+  }
+
+  async *events(): AsyncGenerator<OpenCodeEvent> {
+    if (!this.client) {
+      throw new Error("OpenCode is not started");
+    }
+    const stream = await this.client.global.event({
+      sseDefaultRetryDelay: 1_000,
+      sseMaxRetryAttempts: 10,
+    });
+    for await (const event of stream.stream as AsyncGenerator<GlobalEvent>) {
+      yield { directory: event.directory, payload: event.payload };
+    }
+  }
+
   async close(): Promise<void> {
     this.client = undefined;
     const child = this.child;
@@ -261,4 +391,10 @@ function isConnectionRefused(error: unknown): boolean {
   if (error.name === "AbortError" || error.name === "TimeoutError") return true;
   const cause = (error as { cause?: { code?: unknown } }).cause;
   return cause?.code === "ECONNREFUSED";
+}
+
+function parseModelRef(value: string | undefined): ModelRef | null {
+  const slash = value?.indexOf("/") ?? -1;
+  if (!value || slash <= 0 || slash === value.length - 1) return null;
+  return { providerId: value.slice(0, slash), modelId: value.slice(slash + 1) };
 }
