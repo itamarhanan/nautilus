@@ -1,9 +1,11 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type {
+  DeviceResponse,
   ModelRef,
+  PairingCodeResponse,
   ProjectConfig,
   ProjectRecord,
   ProjectState,
@@ -12,6 +14,8 @@ import type {
   SessionRecord,
   SessionStatus,
 } from "@nautilus/types";
+
+const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 type ProjectRow = {
   id: string;
@@ -25,6 +29,14 @@ type ProjectRow = {
   startedAt: string | null;
   firstSyncAt: string | null;
   updatedAt: string;
+};
+
+type DeviceRow = {
+  id: string;
+  name: string;
+  createdAt: string;
+  lastSeenAt: string | null;
+  revokedAt: string | null;
 };
 
 type SessionRow = {
@@ -52,7 +64,20 @@ function now(): string {
   return new Date().toISOString();
 }
 
+function hashToken(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function generateCode(): string {
+  const bytes = randomBytes(8);
+  return Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join("");
+}
+
 function mapProject(row: ProjectRow): ProjectRecord {
+  return row;
+}
+
+function mapDevice(row: DeviceRow): DeviceResponse {
   return row;
 }
 
@@ -642,6 +667,110 @@ export class Registry {
       this.db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  private pruneExpired(): void {
+    const timestamp = now();
+    for (const table of ["pairing_codes", "preview_tokens", "preview_sessions"]) {
+      this.db.prepare(`DELETE FROM ${table} WHERE expires_at < ?`).run(timestamp);
+    }
+  }
+
+  createPairingCode(deviceName: string, expiresAt: string): PairingCodeResponse {
+    this.pruneExpired();
+    const id = randomUUID();
+    const code = generateCode();
+    this.db
+      .prepare(
+        `
+      INSERT INTO pairing_codes (id, code_hash, device_name, expires_at, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `,
+      )
+      .run(id, hashToken(code), deviceName, expiresAt, now());
+    return { id, code, expiresAt };
+  }
+
+  redeemPairingCode(code: string, deviceName: string): { device: DeviceResponse } {
+    const codeHash = hashToken(code);
+    const deviceId = randomUUID();
+    const timestamp = now();
+
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const pairing = this.db
+        .prepare(
+          `
+        SELECT id, expires_at AS expiresAt
+        FROM pairing_codes WHERE code_hash = ? AND used_at IS NULL AND expires_at > ?
+      `,
+        )
+        .get(codeHash, timestamp) as { id: string; expiresAt: string } | undefined;
+      if (!pairing) {
+        throw new Error("pairing_code_invalid");
+      }
+
+      this.db
+        .prepare("UPDATE pairing_codes SET used_at = ? WHERE id = ?")
+        .run(timestamp, pairing.id);
+      this.db
+        .prepare(
+          `
+        INSERT INTO devices (id, name, token_hash, created_at)
+        VALUES (?, ?, ?, ?)
+      `,
+        )
+        .run(deviceId, deviceName, hashToken(randomUUID()), timestamp);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+
+    return {
+      device: {
+        id: deviceId,
+        name: deviceName,
+        createdAt: timestamp,
+        lastSeenAt: null,
+        revokedAt: null,
+      },
+    };
+  }
+
+  listDevices(): DeviceResponse[] {
+    const rows = this.db
+      .prepare(
+        `
+      SELECT id, name, created_at AS createdAt, last_seen_at AS lastSeenAt, revoked_at AS revokedAt
+      FROM devices ORDER BY created_at DESC
+    `,
+      )
+      .all() as DeviceRow[];
+    return rows.map(mapDevice);
+  }
+
+  findDeviceById(id: string): DeviceResponse | undefined {
+    const row = this.db
+      .prepare(
+        `
+        SELECT id, name, created_at AS createdAt, last_seen_at AS lastSeenAt, revoked_at AS revokedAt
+        FROM devices WHERE id = ? AND revoked_at IS NULL
+    `,
+      )
+      .get(id) as DeviceRow | undefined;
+    return row ? mapDevice(row) : undefined;
+  }
+
+  touchDevice(id: string): void {
+    this.db.prepare("UPDATE devices SET last_seen_at = ? WHERE id = ?").run(now(), id);
+  }
+
+  revokeDevice(id: string): boolean {
+    const result = this.db
+      .prepare("UPDATE devices SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL")
+      .run(now(), id);
+    return Number(result.changes) > 0;
   }
 }
 
