@@ -1,18 +1,27 @@
 import { useEffect, useState } from "react";
+import { brand } from "@nautilus/brand";
+import type { DeviceResponse } from "@nautilus/types";
+import { AlertDialog } from "@astryxdesign/core/AlertDialog";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
 import { Card } from "@astryxdesign/core/Card";
+import { List, ListItem } from "@astryxdesign/core/List";
+import { MetadataList, MetadataListItem } from "@astryxdesign/core/MetadataList";
 import { VStack } from "@astryxdesign/core/Stack";
 import { Tab, TabList } from "@astryxdesign/core/TabList";
 import { Heading, Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { Timestamp } from "@astryxdesign/core/Timestamp";
-import { Wand2 } from "lucide-react";
+import { Smartphone, Wand2 } from "lucide-react";
+import { BrandMark } from "../components/BrandMark";
 import { useApp } from "../context";
 import type { SettingsSection } from "../store";
 import { desktopPaths, readSshConfig } from "../lib/files";
-import { plural } from "../lib/format";
+import { readableStatus } from "@nautilus/copy";
+import { activeDevices, plural } from "../lib/format";
 import { detectLightningHost, type DesktopSettings, type SettingsErrors } from "../lib/settings";
+
+declare const __APP_VERSION__: string;
 
 export function SettingsView({ section }: { section: SettingsSection }) {
   const navigate = useApp((state) => state.navigate);
@@ -31,9 +40,13 @@ export function SettingsView({ section }: { section: SettingsSection }) {
       >
         <Tab value="runner" label="Runner" />
         <Tab value="search" label="Project search" />
+        <Tab value="phones" label="Phones" />
+        <Tab value="about" label="About" />
       </TabList>
       {section === "runner" ? <RunnerSettings /> : null}
       {section === "search" ? <ProjectSearchSettings /> : null}
+      {section === "phones" ? <PhoneSettings /> : null}
+      {section === "about" ? <About /> : null}
     </div>
   );
 }
@@ -293,6 +306,124 @@ function ProjectSearchSettings() {
           </div>
         </div>
       </VStack>
+    </Card>
+  );
+}
+
+function PhoneSettings() {
+  const devices = useApp((state) => state.devices);
+  const connected = useApp((state) => state.connection.phase === "connected");
+  const refreshDevices = useApp((state) => state.refreshDevices);
+  const revokeDevice = useApp((state) => state.revokeDevice);
+  const setLinkPhoneOpen = useApp((state) => state.setLinkPhoneOpen);
+  const [revoking, setRevoking] = useState<DeviceResponse | null>(null);
+  const [busy, setBusy] = useState(false);
+  const active = activeDevices(devices);
+
+  useEffect(() => {
+    void refreshDevices();
+  }, [refreshDevices]);
+
+  return (
+    <Card padding={5}>
+      <VStack gap={4}>
+        <div className="flex items-center justify-between gap-3">
+          <Text color="secondary">A linked phone can use every project on the runner.</Text>
+          <Button
+            label="Link phone"
+            variant="primary"
+            size="sm"
+            isDisabled={!connected}
+            onClick={() => {
+              setLinkPhoneOpen(true);
+            }}
+          />
+        </div>
+        {active.length === 0 ? (
+          <Text type="supporting">No phones linked.</Text>
+        ) : (
+          <List hasDividers>
+            {active.map((device) => (
+              <ListItem
+                key={device.id}
+                label={device.name}
+                startContent={<Smartphone className="size-4 text-secondary" aria-hidden />}
+                description={
+                  device.lastSeenAt ? (
+                    <>
+                      Last seen <Timestamp value={device.lastSeenAt} format="relative" />
+                    </>
+                  ) : (
+                    <>
+                      Linked <Timestamp value={device.createdAt} format="relative" />
+                    </>
+                  )
+                }
+                endContent={
+                  <Button
+                    label="Revoke"
+                    size="sm"
+                    variant="destructive"
+                    onClick={() => {
+                      setRevoking(device);
+                    }}
+                  />
+                }
+              />
+            ))}
+          </List>
+        )}
+      </VStack>
+      <AlertDialog
+        isOpen={revoking !== null}
+        onOpenChange={(open) => {
+          if (!open) setRevoking(null);
+        }}
+        title={`Revoke ${revoking?.name ?? "phone"}?`}
+        description="The phone loses access right away and must be linked again with a new code."
+        actionLabel="Revoke"
+        isActionLoading={busy}
+        onAction={async () => {
+          if (!revoking) return;
+          setBusy(true);
+          await revokeDevice(revoking.id);
+          setBusy(false);
+          setRevoking(null);
+        }}
+      />
+    </Card>
+  );
+}
+
+function About() {
+  const info = useApp((state) => state.connection.info);
+  const agent = useApp((state) => state.agent);
+  return (
+    <Card padding={5}>
+      <div className="mb-5 flex items-center gap-4">
+        <BrandMark size={56} />
+        <div className="flex flex-col gap-0.5">
+          <Heading level={3} accessibilityLevel={2}>
+            {brand.name}
+          </Heading>
+          <Text type="supporting">{brand.tagline}</Text>
+        </div>
+      </div>
+      <MetadataList label={{ position: "start", width: 140 }}>
+        <MetadataListItem label="Desktop app">{__APP_VERSION__}</MetadataListItem>
+        <MetadataListItem label="Runner">
+          {info ? `${info.service} ${info.version}` : "Not connected"}
+        </MetadataListItem>
+        <MetadataListItem label="Runner state">
+          {info ? readableStatus(info.lifecycle.state) : "—"}
+        </MetadataListItem>
+        <MetadataListItem label="Sync agent">{readableStatus(agent.phase)}</MetadataListItem>
+        <MetadataListItem label="Settings file">
+          <Text type="code" className="select-text">
+            ~/.nautilus/config.json
+          </Text>
+        </MetadataListItem>
+      </MetadataList>
     </Card>
   );
 }
