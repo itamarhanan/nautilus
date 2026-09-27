@@ -82,6 +82,46 @@ export const activity = {
     target ? `Running ${name}: ${target}` : `Running ${name}`,
 };
 
+export const subagent = {
+  title: "Subagent",
+  starting: "Starting",
+  failed: "Failed",
+  done: "Done",
+  stoppedEarly: "Stopped before it finished",
+  toolCalls: (count: number) => (count === 1 ? "1 tool call" : `${String(count)} tool calls`),
+  byAgent: (agentType: string) => `${agentType} subagent`,
+  stoppedTitle: "Subagent stopped",
+  stoppedDetail: "It stopped before it finished.",
+  fromMainAgent: "From the main agent",
+};
+
+export const transcript = {
+  retrying: "Retrying the last turn",
+  turnInterrupted: "Turn interrupted",
+  turnFailed: "The agent turn failed",
+  changesCheckpointed: "Changes checkpointed",
+  checkpoint: (commit: string) => `Checkpoint ${commit.slice(0, 7)}`,
+  readyForInstruction: "Ready for an instruction",
+  mainThread: "Main",
+  defaultPermission: "tool",
+};
+
+export const agent = {
+  phase: {
+    stopped: "Stopped",
+    starting: "Starting",
+    running: "Running on this PC",
+    error: "Failed to start",
+  },
+  exit: {
+    portInUse: (port: number) =>
+      `Port ${String(port)} is already in use. Stop any other Nautilus sync agent and try again.`,
+    stopped: "The sync agent stopped",
+    stoppedWithCode: (code: number) => `The sync agent stopped with code ${String(code)}.`,
+    stoppedWithDetail: (detail: string) => `The sync agent stopped: ${detail}`,
+  },
+};
+
 export const permission: {
   label: Record<string, string>;
   unknown: (name: string) => string;
