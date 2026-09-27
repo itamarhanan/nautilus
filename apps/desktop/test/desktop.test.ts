@@ -1,4 +1,7 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { friendlyError } from "../src/lib/errors";
 import {
   describeFolder,
   fuzzyMatch,
@@ -8,6 +11,7 @@ import {
   type DirEntry,
   type FolderIo,
 } from "../src/lib/folders";
+import type { RunningProcess, SpawnHandlers, Spawner } from "../src/lib/process";
 import {
   detectLightningHost,
   readSettings,
@@ -15,6 +19,7 @@ import {
   validateSettings,
   type DesktopSettings,
 } from "../src/lib/settings";
+import { controlArgs, resolveHomePath, SshForward, syncArgs } from "../src/lib/ssh";
 import {
   emptyState,
   maxRecentFolders,
@@ -35,6 +40,47 @@ const settings: DesktopSettings = {
   },
   projectRoots: ["~/code"],
 };
+
+type FakeChild = {
+  program: string;
+  args: string[];
+  handlers: SpawnHandlers;
+  written: string[];
+  killed: boolean;
+};
+
+function fakeSpawner(behave: (child: FakeChild) => void = () => undefined): {
+  spawn: Spawner;
+  children: FakeChild[];
+} {
+  const children: FakeChild[] = [];
+  const spawn: Spawner = (program, args, handlers) => {
+    const child: FakeChild = {
+      program,
+      args,
+      handlers,
+      written: [],
+      killed: false,
+    };
+    children.push(child);
+    const running: RunningProcess = {
+      write: (data) => {
+        child.written.push(data);
+        return Promise.resolve();
+      },
+      kill: () => {
+        child.killed = true;
+        handlers.onClose(null);
+        return Promise.resolve();
+      },
+    };
+    queueMicrotask(() => {
+      behave(child);
+    });
+    return Promise.resolve(running);
+  };
+  return { spawn, children };
+}
 
 describe("settings", () => {
   it("migrates keys from older config files and writes only global settings", () => {
@@ -242,6 +288,121 @@ describe("project folders", () => {
     expect(fuzzyMatch("ns", "nautilus-shop")?.indices).toEqual([0, 9]);
     expect(rankFolders("", items).map((entry) => entry.item.name)).toEqual(
       items.map((item) => item.name),
+    );
+  });
+});
+
+describe("ssh forwards", () => {
+  const capability = JSON.parse(
+    readFileSync(
+      fileURLToPath(new URL("../src-tauri/capabilities/default.json", import.meta.url)),
+      "utf8",
+    ),
+  ) as {
+    permissions: Array<
+      | string
+      | {
+          identifier: string;
+          allow?: Array<{
+            name?: string;
+            cmd?: string;
+            sidecar?: boolean;
+            args?: unknown[];
+          }>;
+        }
+    >;
+  };
+  const spawnScope = capability.permissions.find(
+    (
+      permission,
+    ): permission is {
+      identifier: string;
+      allow: Array<{
+        name?: string;
+        cmd?: string;
+        sidecar?: boolean;
+        args?: unknown[];
+      }>;
+    } => typeof permission === "object" && permission.identifier === "shell:allow-spawn",
+  );
+
+  function allowedBy(name: string, args: string[]): boolean {
+    const scope = spawnScope?.allow.find((entry) => entry.name === name)?.args;
+    if (!scope || scope.length !== args.length) return false;
+    return scope.every((rule, index) => {
+      const value = args[index] ?? "";
+      return typeof rule === "string"
+        ? rule === value
+        : new RegExp((rule as { validator: string }).validator).test(value);
+    });
+  }
+
+  const key = resolveHomePath(settings.ssh.keyPath, "/home/me");
+
+  it("builds a local-only control forward the capability allows", () => {
+    const args = controlArgs(settings, key, 47123);
+    expect(args).toContain("-L");
+    expect(args).not.toContain("-R");
+    expect(args).toContain("127.0.0.1:47123:127.0.0.1:4001");
+    expect(args).toContain("StrictHostKeyChecking=accept-new");
+    expect(allowedBy("nautilus-ssh-control", args)).toBe(true);
+
+    expect(
+      allowedBy(
+        "nautilus-ssh-control",
+        args.map((arg) => arg.replace(":4001", ":22")),
+      ),
+    ).toBe(false);
+  });
+
+  it("builds a reverse-only sync forward the capability allows", () => {
+    const args = syncArgs(settings, key);
+    expect(args).toContain("-R");
+    expect(args).not.toContain("-L");
+    expect(args).toContain("127.0.0.1:4200:127.0.0.1:4100");
+    expect(allowedBy("nautilus-ssh-sync", args)).toBe(true);
+    expect(allowedBy("nautilus-ssh-control", args)).toBe(false);
+  });
+
+  it("allows the agent only as the shipped sidecar with a stdin key", () => {
+    expect(allowedBy("binaries/nautilus-sync-agent", ["--launch-key-stdin"])).toBe(true);
+    expect(allowedBy("binaries/nautilus-sync-agent", ["-e", "--launch-key-stdin"])).toBe(false);
+    expect(allowedBy("binaries/nautilus-sync-agent", [])).toBe(false);
+    const entry = spawnScope?.allow.find((scope) => scope.name === "binaries/nautilus-sync-agent");
+    expect(entry?.sidecar).toBe(true);
+    expect(spawnScope?.allow.some((scope) => scope.cmd === "node")).toBe(false);
+  });
+
+  it("rejects unsafe SSH targets and key paths", () => {
+    expect(() =>
+      controlArgs(
+        { ...settings, ssh: { ...settings.ssh, user: "s_1 -oProxyCommand=x" } },
+        key,
+        47000,
+      ),
+    ).toThrow();
+    expect(() => resolveHomePath("relative/key", "/home/me")).toThrow();
+    expect(resolveHomePath("~/.ssh/k", "/home/me")).toBe("/home/me/.ssh/k");
+  });
+
+  it("connects once ready and reports ssh's reason when it exits first", async () => {
+    const good = fakeSpawner();
+    const forward = new SshForward("nautilus-ssh-sync", ["args"], good.spawn);
+    await forward.start(() => Promise.resolve(true));
+    expect(forward.state).toBe("connected");
+    await forward.stop();
+    expect(good.children[0]?.killed).toBe(true);
+
+    const failing = fakeSpawner((child) => {
+      child.handlers.onStderr?.("s_01abc@ssh.lightning.ai: Permission denied (publickey).");
+      child.handlers.onClose(255);
+    });
+    const broken = new SshForward("nautilus-ssh-sync", ["args"], failing.spawn);
+    await expect(broken.start(() => Promise.resolve(false), 2_000)).rejects.toThrow(
+      /Permission denied/,
+    );
+    expect(friendlyError(new Error("ssh exited: Permission denied (publickey)")).message).toMatch(
+      /rejected the SSH key/,
     );
   });
 });
