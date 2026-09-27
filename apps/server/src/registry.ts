@@ -772,6 +772,66 @@ export class Registry {
       .run(now(), id);
     return Number(result.changes) > 0;
   }
+
+  createPreviewToken(idHash: string, projectId: string, expiresAt: string): void {
+    this.pruneExpired();
+    this.db
+      .prepare(
+        `
+        INSERT INTO preview_tokens (id_hash, project_id, expires_at, created_at)
+        VALUES (?, ?, ?, ?)
+      `,
+      )
+      .run(idHash, projectId, expiresAt, now());
+  }
+
+  redeemPreviewToken(
+    idHash: string,
+    sessionTokenHash: string,
+    projectId: string,
+    sessionExpiresAt: string,
+  ): boolean {
+    const timestamp = now();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.db
+        .prepare(
+          `
+          UPDATE preview_tokens SET used_at = ?
+          WHERE id_hash = ? AND project_id = ? AND used_at IS NULL AND expires_at > ?
+        `,
+        )
+        .run(timestamp, idHash, projectId, timestamp);
+      if (Number(result.changes) !== 1) {
+        throw new Error("preview_token_replayed");
+      }
+      this.db
+        .prepare(
+          `
+          INSERT INTO preview_sessions (token_hash, project_id, expires_at, created_at)
+          VALUES (?, ?, ?, ?)
+        `,
+        )
+        .run(sessionTokenHash, projectId, sessionExpiresAt, timestamp);
+      this.db.exec("COMMIT");
+      return true;
+    } catch {
+      this.db.exec("ROLLBACK");
+      return false;
+    }
+  }
+
+  findPreviewSession(tokenHash: string): { projectId: string } | undefined {
+    const row = this.db
+      .prepare(
+        `
+        SELECT project_id AS projectId FROM preview_sessions
+        WHERE token_hash = ? AND expires_at > ?
+      `,
+      )
+      .get(tokenHash, now()) as { projectId: string } | undefined;
+    return row;
+  }
 }
 
 function isModelRef(value: unknown): value is ModelRef {
