@@ -944,6 +944,160 @@ describe("desktop store", () => {
     });
   });
 
+  describe("reviewing a sync", () => {
+    const preview: SyncResponse = {
+      version: 1,
+      requestId: "preview-1",
+      status: "ok",
+      state: {
+        projectId: "shop",
+        head: "c".repeat(40),
+        baseHead: "b".repeat(40),
+        dirty: false,
+        changes: { files: [], additions: 0, deletions: 0 },
+      },
+      diff: { files: [], additions: 0, deletions: 0 },
+    };
+    const conflict: SyncResponse = {
+      version: 1,
+      requestId: "pull-1",
+      status: "conflict",
+      conflicts: [
+        {
+          path: "a.ts",
+          reason: "content_conflict",
+          pc: "modified",
+          runner: "modified",
+        },
+        {
+          path: "b.ts",
+          reason: "content_conflict",
+          pc: "modified",
+          runner: "modified",
+        },
+      ],
+    };
+    const applied: SyncResponse = {
+      version: 1,
+      requestId: "pull-2",
+      status: "ok",
+    };
+
+    async function reviewing() {
+      const harness = services({
+        loadState: () => Promise.resolve(twoProjects),
+      });
+      harness.control.projects.mockResolvedValue([{ id: "shop", name: "shop", state: "idle" }]);
+      harness.control.syncPreview.mockResolvedValue(preview);
+      const store = createDesktopStore(harness.value);
+      await store.getState().init();
+      await store.getState().refreshRunner();
+      await store.getState().startReview("pull", "shop");
+      return { ...harness, store };
+    }
+
+    it("keeps the grant through a conflict and retries with the chosen sides", async () => {
+      const { store, control, agentClient } = await reviewing();
+      expect(store.getState().review).toMatchObject({
+        phase: "ready",
+        preview,
+      });
+      control.sync.mockResolvedValueOnce(conflict).mockResolvedValueOnce(applied);
+
+      await store.getState().applyReview();
+      expect(store.getState().review?.phase).toBe("resolving");
+      expect(control.sync).toHaveBeenLastCalledWith(
+        "shop",
+        "pull",
+        expect.objectContaining({
+          grant: "payload.sig",
+          requestId: "preview-1",
+        }),
+      );
+
+      expect(agentClient.revokeGrant).not.toHaveBeenCalled();
+
+      store.getState().resolveConflicts(["a.ts", "b.ts"], "runner");
+      store.getState().resolveConflicts(["b.ts"], "pc");
+      expect(store.getState().review?.resolutions).toEqual({
+        "a.ts": "runner",
+        "b.ts": "pc",
+      });
+
+      await store.getState().applyReview();
+
+      const retry = control.sync.mock.calls[1]?.[2] as {
+        requestId?: string;
+        resolutions?: unknown;
+      };
+      expect(retry.requestId).toBeUndefined();
+      expect(retry.resolutions).toEqual({ "a.ts": "runner", "b.ts": "pc" });
+      expect(store.getState().review?.phase).toBe("done");
+      expect(agentClient.revokeGrant).toHaveBeenCalledWith("grant-1");
+    });
+
+    it("finishes an apply after the sheet closes and reports it as a toast", async () => {
+      const { store, control } = await reviewing();
+      let finish: (result: SyncResponse) => void = () => undefined;
+      control.sync.mockReturnValueOnce(
+        new Promise<SyncResponse>((resolve) => {
+          finish = resolve;
+        }),
+      );
+      const applying = store.getState().applyReview();
+      await store.getState().closeReview();
+      expect(store.getState().review).toMatchObject({
+        phase: "applying",
+        background: true,
+      });
+
+      finish(applied);
+      await applying;
+      expect(store.getState().review).toBeNull();
+      expect(store.getState().notices.at(-1)).toMatchObject({
+        tone: "success",
+        body: "shop",
+      });
+    });
+
+    it("reopens the sheet when a background apply is blocked", async () => {
+      const { store, control, agentClient } = await reviewing();
+      let finish: (result: SyncResponse) => void = () => undefined;
+      control.sync.mockReturnValueOnce(
+        new Promise<SyncResponse>((resolve) => {
+          finish = resolve;
+        }),
+      );
+      const applying = store.getState().applyReview();
+      await store.getState().closeReview();
+      finish({
+        version: 1,
+        requestId: "pull-1",
+        status: "stale",
+        error: {
+          code: "base_mismatch",
+          message: "PC and runner synchronization bases differ",
+        },
+      });
+      await applying;
+      expect(store.getState().review).toMatchObject({
+        phase: "blocked",
+        background: false,
+      });
+      expect(store.getState().notices.at(-1)).toMatchObject({
+        tone: "warning",
+      });
+      expect(agentClient.revokeGrant).toHaveBeenCalledWith("grant-1");
+    });
+
+    it("closing a review that is not applying revokes its grant", async () => {
+      const { store, agentClient } = await reviewing();
+      await store.getState().closeReview();
+      expect(store.getState().review).toBeNull();
+      expect(agentClient.revokeGrant).toHaveBeenCalledWith("grant-1");
+    });
+  });
+
   it("announces new runner work once, and stays quiet on the first look and when nothing moved", async () => {
     const alert = vi.fn();
     const { value, control } = services({
