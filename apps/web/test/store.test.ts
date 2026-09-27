@@ -3,10 +3,12 @@ import type {
   BootstrapResponse,
   ProjectRecord,
   RecoverySummary,
+  SessionEvent,
   SessionRecord,
   SyncEvent,
 } from "@nautilus/types";
 import { createWorkspaceStore } from "@/store";
+import { openSessionRecord } from "@/store/selectors";
 
 type Handler = (init: RequestInit | undefined) => Response | Promise<Response>;
 
@@ -26,6 +28,14 @@ function stubApi(routes: Record<string, Handler>) {
     }),
   );
   return calls;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
 }
 
 const lifecycle: RecoverySummary = {
@@ -65,6 +75,18 @@ function session(id: string, patch: Partial<SessionRecord> = {}): SessionRecord 
     createdAt: "2026-09-26T10:00:00Z",
     updatedAt: "2026-09-26T10:00:00Z",
     ...patch,
+  };
+}
+
+function event(sequence: number, type: SessionEvent["type"], sessionId = "s1"): SessionEvent {
+  return {
+    sessionId,
+    projectId: "p1",
+    sequence,
+    timestamp: "2026-09-26T10:01:00Z",
+    type,
+    durable: true,
+    payload: {},
   };
 }
 
@@ -170,5 +192,85 @@ describe("refresh", () => {
     const before = calls.length;
     await Promise.all([store.getState().actions.refresh(), store.getState().actions.refresh()]);
     expect(calls.slice(before).filter((call) => call === "GET /api/bootstrap")).toHaveLength(1);
+  });
+});
+
+describe("selecting", () => {
+  test("opens the newest session of a project", async () => {
+    const { store } = await openStore([session("s2"), session("s1")]);
+    expect(store.getState().session?.id).toBe("s2");
+    expect(store.getState().view).toBe("chat");
+  });
+
+  test("a slow load for a project left behind is ignored", async () => {
+    const slow = deferred<Response>();
+    stubApi({
+      "GET /api/bootstrap": () => json(200, bootstrapBody),
+      "GET /api/sessions?projectId=p1": () => slow.promise,
+      "GET /api/projects/p1/sync-history": () => json(200, { events: [] }),
+      ...projectRoutes("p2", [session("s9", { projectId: "p2" })]),
+    });
+    const store = createWorkspaceStore();
+    await store.getState().actions.bootstrap();
+    store.getState().actions.selectProject("p1");
+    store.getState().actions.selectProject("p2");
+    await vi.waitFor(() => {
+      expect(store.getState().project?.isLoaded).toBe(true);
+    });
+    slow.resolve(json(200, { sessions: [session("s1")] }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(store.getState().project?.id).toBe("p2");
+    expect(store.getState().session?.id).toBe("s9");
+  });
+
+  test("navigate restores project, session and tab from an address", async () => {
+    stubApi({
+      "GET /api/bootstrap": () => json(200, bootstrapBody),
+      ...projectRoutes("p1", [session("s2"), session("s1")]),
+    });
+    const store = createWorkspaceStore();
+    await store.getState().actions.bootstrap();
+    store.getState().actions.navigate({
+      projectId: "p1",
+      sessionId: "s1",
+      view: "history",
+      isInfoOpen: false,
+    });
+    await vi.waitFor(() => {
+      expect(store.getState().project?.isLoaded).toBe(true);
+    });
+    expect(store.getState().session?.id).toBe("s1");
+    expect(store.getState().view).toBe("history");
+  });
+});
+
+describe("the open session", () => {
+  test("events move the session's status and end the wait on a terminal event", async () => {
+    const { store } = await openStore([session("s1", { status: "running" })]);
+    const { actions } = store.getState();
+    actions.applySnapshot({
+      session: session("s1", { status: "running" }),
+      events: [],
+    });
+    expect(store.getState().session?.awaitingEvent).toBe(true);
+
+    actions.applyEvent(event(1, "session.message"));
+    actions.applyEvent(event(2, "session.completed"));
+    const state = store.getState();
+    expect(state.session?.events.map((one) => one.sequence)).toEqual([1, 2]);
+    expect(state.session?.awaitingEvent).toBe(false);
+    expect(openSessionRecord(state)?.status).toBe("idle");
+  });
+
+  test("events and snapshots for another session are dropped", async () => {
+    const { store } = await openStore([session("s1")]);
+    const { actions } = store.getState();
+    actions.applyEvent(event(1, "session.message", "other"));
+    actions.applySnapshot({
+      session: session("other"),
+      events: [event(1, "session.message")],
+    });
+    expect(store.getState().session?.events).toEqual([]);
+    expect(store.getState().session?.isSnapshotLoaded).toBe(false);
   });
 });
