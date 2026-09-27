@@ -1,6 +1,16 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { join, relative, resolve, sep, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -75,6 +85,17 @@ const shadowExcludePath = (gitDir: string): string => join(resolve(gitDir), "nau
 
 const legacyStatePath = (gitDir: string, file: string): string =>
   join(resolve(gitDir), "nautilus", "lines", "default", file);
+
+function isRepositoryPath(path: string): boolean {
+  return (
+    path.length > 0 &&
+    path.length <= 4096 &&
+    !path.includes("\0") &&
+    !path.startsWith("/") &&
+    !path.includes("\\") &&
+    path.split("/").every((part) => part !== "" && part !== "." && part !== ".." && part !== ".git")
+  );
+}
 
 export class ShadowGitError extends Error {
   constructor(
@@ -547,9 +568,70 @@ export class ShadowGit {
     return { files, additions, deletions };
   }
 
+  async compareWorktreeFile(commit: string, path: string): Promise<SyncFileChange> {
+    if (!isRepositoryPath(path)) throw new ShadowGitError("invalid_path", "Path is not valid");
+    await this.git(["cat-file", "-e", `${commit}^{commit}`]).catch(() => {
+      throw new ShadowGitError("unknown_commit", "That version is not on this machine");
+    });
+    const local = await lstat(join(this.workTree, path)).catch(() => null);
+    if (local && !local.isFile())
+      throw new ShadowGitError("invalid_path", "Only regular files can be compared");
+    const theirs = await this.git(["rev-parse", "--verify", "--quiet", `${commit}:${path}`]).then(
+      (output) => output.toString("utf8").trim(),
+      () => null,
+    );
+    const empty = await this.emptyBlob();
+    const ours = local
+      ? (await this.git(["hash-object", "-w", "--", path])).toString("utf8").trim()
+      : empty;
+    const file: SyncFileChange = {
+      path,
+      status: !local ? "added" : theirs === null ? "deleted" : "modified",
+      binary: false,
+      additions: 0,
+      deletions: 0,
+      hunks: [],
+    };
+    const theirsBlob = theirs ?? empty;
+    if (ours === theirsBlob) return file;
+    const statistic = parseNumstat(
+      (await this.git(["diff", "--numstat", "-z", ours, theirsBlob])).toString("utf8"),
+    )
+      .values()
+      .next().value;
+    file.binary = statistic?.binary ?? false;
+    file.additions = statistic?.additions ?? 0;
+    file.deletions = statistic?.deletions ?? 0;
+    if (file.binary) return file;
+    if (file.additions + file.deletions > maxFileDiffLines) {
+      file.omitted = "large";
+      return file;
+    }
+    const output = await this.git([
+      "diff",
+      "--no-color",
+      "--no-ext-diff",
+      "--unified=3",
+      ours,
+      theirsBlob,
+    ]);
+    if (output.length > maxFileDiffBytes) {
+      file.omitted = "large";
+      return file;
+    }
+    file.hunks = parseUnifiedDiff(output.toString("utf8"), Number.POSITIVE_INFINITY).hunks;
+    return file;
+  }
+
   async restoreHead(head: string): Promise<void> {
     await this.git(["read-tree", "-u", "--reset", head]);
     await this.git(["update-ref", headRef, head]);
+  }
+
+  private async emptyBlob(): Promise<string> {
+    const path = join(this.gitDir, "nautilus", "empty");
+    await writeFile(path, "", { flag: "a" });
+    return (await this.git(["hash-object", "-w", "--no-filters", path])).toString("utf8").trim();
   }
 
   private async emptyTree(): Promise<string> {
