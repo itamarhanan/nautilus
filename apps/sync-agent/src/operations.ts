@@ -164,6 +164,8 @@ export class SyncAgent {
     switch (request.operation) {
       case "state":
         return this.state(request, project);
+      case "preview":
+        return this.preview(request, project);
       case "history":
         return this.history(request, project);
       default:
@@ -184,6 +186,25 @@ export class SyncAgent {
         dirty: !(await git.isClean()),
         changes: head ? await git.diff(baseHead, head) : emptyDiff(),
       },
+    });
+  }
+
+  private async preview(request: SyncRequest, project: AgentProject): Promise<SyncResponse> {
+    const git = await this.git(project);
+    const head = await git.snapshot(`Nautilus local preview ${now()}`);
+
+    const baseHead = await this.reconcileBase(request, project, git);
+    const changes = await git.diff(baseHead, head);
+    return response(request.requestId, {
+      status: "ok",
+      state: {
+        projectId: project.id,
+        head,
+        baseHead,
+        dirty: false,
+        changes,
+      },
+      diff: changes,
     });
   }
 
