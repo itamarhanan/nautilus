@@ -146,3 +146,18 @@ test("stopping OpenCode stops the server a launcher shim started, not just the s
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("a missing binary fails start with a reason instead of crashing the server", async () => {
+  const { root, dataDir } = await fixture();
+  const openCode = new OpenCodeProcess(new Logger(() => undefined), {
+    binary: join(root, "not-installed", "opencode"),
+    dataDir,
+    port: await freePort(),
+  });
+  try {
+    await expect(openCode.start()).rejects.toThrow(/OpenCode was not found at .*not-installed/);
+  } finally {
+    await openCode.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

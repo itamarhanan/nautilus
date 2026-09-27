@@ -1,7 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { accessSync, constants, readFileSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { createConnection } from "node:net";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   createOpencodeClient,
   type Event,
@@ -53,6 +55,7 @@ export class OpenCodeProcess implements OpenCodeService {
   private readonly binary: string;
   private readonly logger: Logger;
   private child: ChildProcess | undefined;
+  private spawnError: Error | undefined;
   private client: OpencodeClient | undefined;
   private starting: Promise<void> | undefined;
 
@@ -61,7 +64,8 @@ export class OpenCodeProcess implements OpenCodeService {
     this.port = options.port ?? 4096;
     this.dataDir = options.dataDir ?? `${process.env.HOME ?? "/tmp"}/nautilus/opencode/state`;
     this.startupTimeoutMs = options.startupTimeoutMs ?? 30_000;
-    this.binary = options.binary ?? process.env.NAUTILUS_OPENCODE_BIN ?? "opencode";
+    this.binary =
+      options.binary ?? process.env.NAUTILUS_OPENCODE_BIN ?? packagedBinary() ?? "opencode";
     this.logger = logger;
   }
 
@@ -91,7 +95,12 @@ export class OpenCodeProcess implements OpenCodeService {
       throw new Error(`OpenCode port ${String(this.port)} is already in use by another process`);
     }
     const startedAt = Date.now();
-    this.logger.info("opencode_starting", { host: this.host, port: this.port });
+    this.logger.info("opencode_starting", {
+      host: this.host,
+      port: this.port,
+      binary: this.binary,
+    });
+    this.spawnError = undefined;
     this.child = spawn(
       this.binary,
       ["serve", `--hostname=${this.host}`, `--port=${String(this.port)}`],
@@ -108,6 +117,19 @@ export class OpenCodeProcess implements OpenCodeService {
       },
     );
     const child = this.child;
+    // A binary that cannot be run is reported as an 'error' event on a later
+    // tick, and an 'error' event with no listener kills the whole server. The
+    // listener has to exist before the first await below.
+    const spawnFailed = new Promise<"exited">((resolve) => {
+      child.on("error", (error) => {
+        this.spawnError ??= error;
+        this.logger.error("opencode_spawn_failed", {
+          binary: this.binary,
+          error: error.message,
+        });
+        resolve("exited");
+      });
+    });
     if (child.pid !== undefined) {
       await writeFile(this.pidPath(), `${String(child.pid)}\n`, {
         mode: 0o600,
@@ -125,6 +147,7 @@ export class OpenCodeProcess implements OpenCodeService {
       child.once("exit", () => {
         resolve("exited");
       });
+      void spawnFailed.then(resolve);
     });
     child.stderr?.on("data", (chunk: Buffer) => {
       for (const line of chunk.toString().split("\n")) {
@@ -182,6 +205,16 @@ export class OpenCodeProcess implements OpenCodeService {
     while (Date.now() < deadline) {
       const signal = await Promise.race([signals, sleep(Math.min(delayMs, deadline - Date.now()))]);
       const listening = signal === "listening";
+      if (this.spawnError) {
+        const error = this.spawnError;
+        this.child = undefined;
+        const missing = (error as NodeJS.ErrnoException).code === "ENOENT";
+        throw new Error(
+          missing
+            ? `OpenCode was not found at ${this.binary}; run scripts/install-opencode.sh`
+            : `OpenCode could not be started from ${this.binary}: ${error.message}`,
+        );
+      }
       if (!this.child || this.child.exitCode !== null) {
         throw new Error("OpenCode exited before becoming ready");
       }
@@ -326,6 +359,26 @@ export class OpenCodeProcess implements OpenCodeService {
       return;
     }
     await stopProcess(child.pid);
+  }
+}
+
+// The opencode-ai package puts its platform binary where its own package.json
+// says. The server is started with plain node, not through pnpm, so the
+// workspace's node_modules/.bin is not on the PATH and "opencode" alone is
+// usually not found.
+function packagedBinary(): string | undefined {
+  try {
+    const manifestPath = createRequire(import.meta.url).resolve("opencode-ai/package.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+      bin?: string | Record<string, string>;
+    };
+    const relative = typeof manifest.bin === "string" ? manifest.bin : manifest.bin?.opencode;
+    if (!relative) return undefined;
+    const binary = join(dirname(manifestPath), relative);
+    accessSync(binary, constants.X_OK);
+    return binary;
+  } catch {
+    return undefined;
   }
 }
 
