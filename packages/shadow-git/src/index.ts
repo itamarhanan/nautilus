@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
-import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
-import { join, resolve, dirname } from "node:path";
+import { mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
+import { join, relative, resolve, sep, dirname } from "node:path";
 
 export { LockBusyError, pruneFiles, readJson, withLock, writeJson } from "./durable";
 
@@ -39,6 +39,7 @@ const ignoredNames = new Set([
   ".gradle",
   ".terraform",
 ]);
+const ignoredFiles = /^\.env(?:\..*)?$|\.log$/;
 
 const headRef = "refs/nautilus/head";
 const baselineRef = "refs/nautilus/baseline";
@@ -51,6 +52,8 @@ const legacyRefs: readonly (readonly [legacy: string, current: string])[] = [
 ];
 
 export const commitPattern = /^[0-9a-f]{40,64}$/;
+
+const maxMessageLength = 500;
 
 export const shadowIndexPath = (gitDir: string): string =>
   join(resolve(gitDir), "nautilus", "index");
@@ -265,6 +268,56 @@ export class ShadowGit {
     return this.ref(headRef);
   }
 
+  private async stage(): Promise<void> {
+    const ignored = await this.ignoredPaths();
+    const excluded = await this.scan(new Set([...ignored.untracked, ...ignored.tracked]));
+
+    await writeFile(this.excludePath, excluded.map((path) => `${path}/`).join("\n"), {
+      mode: 0o600,
+    });
+    for (const path of excluded) {
+      await this.git(["update-index", "--force-remove", "--", path]).catch(() => undefined);
+    }
+
+    for (let start = 0; start < ignored.tracked.length; start += 500) {
+      await this.git([
+        "update-index",
+        "--force-remove",
+        "--",
+        ...ignored.tracked.slice(start, start + 500),
+      ]);
+    }
+
+    await this.validateIndex();
+    await this.git(["add", "--all", "--", "."]);
+    await this.validateIndex();
+  }
+
+  async baseline(): Promise<string> {
+    await this.initialize();
+    const existing = await this.ref(baselineRef);
+    if (existing !== null) return existing;
+    await this.stage();
+    await this.validateIndex();
+    const tree = (await this.git(["write-tree"])).toString("utf8").trim();
+    const commit = (
+      await this.git(["commit-tree", tree, "-m", "Nautilus synchronization baseline"])
+    )
+      .toString("utf8")
+      .trim();
+    await this.git(["update-ref", baselineRef, commit]);
+    if ((await this.head()) === null) await this.git(["update-ref", headRef, commit]);
+    return commit;
+  }
+
+  async mergeBase(): Promise<string> {
+    await this.initialize();
+    const tree = (await this.git(["mktree"])).toString("utf8").trim();
+    return (await this.git(["commit-tree", tree, "-m", "Nautilus synchronization merge base"]))
+      .toString("utf8")
+      .trim();
+  }
+
   private async ref(reference: string): Promise<string | null> {
     try {
       const value = (await this.git(["rev-parse", reference])).toString("utf8").trim();
@@ -285,5 +338,142 @@ export class ShadowGit {
       }
     }
     return (await this.git(["ls-files", "--others", "--exclude-standard"])).length === 0;
+  }
+
+  async isAncestor(ancestor: string, descendant: string): Promise<boolean> {
+    try {
+      await this.git(["merge-base", "--is-ancestor", ancestor, descendant]);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async snapshot(message: string): Promise<string> {
+    await this.baseline();
+    await this.stage();
+    await this.validateIndex();
+    const tree = (await this.git(["write-tree"])).toString("utf8").trim();
+    const current = await this.head();
+    if (current !== null) {
+      const currentTree = (await this.git(["rev-parse", `${current}^{tree}`]))
+        .toString("utf8")
+        .trim();
+      if (currentTree === tree) return current;
+    }
+    const parents = current === null ? [] : ["-p", current];
+    const commit = (
+      await this.git(["commit-tree", tree, ...parents, "-m", message.slice(0, maxMessageLength)])
+    )
+      .toString("utf8")
+      .trim();
+    await this.git(["update-ref", headRef, commit]);
+    return commit;
+  }
+
+  private async validateIndex(): Promise<void> {
+    const entries = (await this.git(["ls-files", "-s", "-z"])).toString("utf8");
+    for (const entry of entries.split("\0").filter(Boolean)) {
+      const [metadata, path] = entry.split("\t", 2);
+      const mode = metadata?.split(" ", 1)[0];
+
+      if (mode === undefined || path === undefined)
+        throw new ShadowGitError("unsupported_tree_mode", "Tree entry could not be read");
+      if (mode === "160000")
+        throw new ShadowGitError("submodule_rejected", `Submodule is not synchronizable: ${path}`);
+      if (mode !== "100644" && mode !== "100755")
+        throw new ShadowGitError(
+          "unsupported_tree_mode",
+          `Tree entry is not a regular file: ${path}`,
+        );
+    }
+  }
+
+  private async ignoredPaths(): Promise<{
+    untracked: string[];
+    tracked: string[];
+  }> {
+    const list = async (args: string[]): Promise<string[]> =>
+      (
+        await this.git([
+          "-c",
+          `core.excludesFile=${join(this.gitDir, "info", "exclude")}`,
+          "ls-files",
+          "--ignored",
+          "--exclude-standard",
+          "-z",
+          ...args,
+        ])
+      )
+        .toString("utf8")
+        .split("\0")
+        .filter(Boolean)
+        .map((path) => path.replace(/\/$/, ""));
+    return {
+      untracked: await list(["--others", "--directory", "--no-empty-directory"]),
+      tracked: await list(["--cached"]),
+    };
+  }
+
+  private async scan(ignored: ReadonlySet<string>): Promise<string[]> {
+    let count = 0;
+    let totalBytes = 0;
+    const excluded: string[] = [];
+    const visit = async (directory: string): Promise<void> => {
+      const entries = await readdir(directory, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.name === ".gitmodules")
+          throw new ShadowGitError("gitmodules_rejected", ".gitmodules is not synchronizable");
+      }
+      const repository = relative(this.workTree, directory).split(sep).join("/");
+      if (repository !== "" && entries.some((entry) => entry.name === ".git")) {
+        excluded.push(repository);
+        return;
+      }
+      for (const entry of entries) {
+        const absolute = join(directory, entry.name);
+        const path = relative(this.workTree, absolute).split(sep).join("/");
+        if (
+          ignored.has(path) ||
+          ignoredNames.has(entry.name) ||
+          (entry.isFile() && ignoredFiles.test(entry.name))
+        )
+          continue;
+        if (entry.isSymbolicLink())
+          throw new ShadowGitError("symlink_rejected", `Symlink is not synchronizable: ${path}`);
+        if (entry.isDirectory()) {
+          await visit(absolute);
+          continue;
+        }
+        if (!entry.isFile())
+          throw new ShadowGitError(
+            "special_file_rejected",
+            `Special file is not synchronizable: ${path}`,
+          );
+        const file = await stat(absolute);
+        count += 1;
+        totalBytes += file.size;
+        if (file.size > this.limits.maxFileBytes || totalBytes > this.limits.maxTotalBytes)
+          throw new ShadowGitError(
+            "file_too_large",
+            `Synchronized file exceeds the configured size limit: ${path}. Add it to .gitignore to leave it out of synchronization.`,
+          );
+        if (count > this.limits.maxFileCount)
+          throw new ShadowGitError(
+            "too_many_files",
+            "Synchronized file count exceeds the configured limit",
+          );
+        const prefix = await readFile(absolute)
+          .then((bytes) => bytes.subarray(0, 200).toString("utf8"))
+          .catch(() => "");
+        if (prefix.startsWith("version https://git-lfs.github.com/spec/v1"))
+          throw new ShadowGitError(
+            "lfs_pointer_rejected",
+            `Git LFS pointer is not synchronizable: ${path}`,
+          );
+      }
+    };
+    await visit(this.workTree);
+    return excluded;
   }
 }
