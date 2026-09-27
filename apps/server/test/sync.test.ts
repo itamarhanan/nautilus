@@ -1,4 +1,6 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { mkdtemp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
@@ -507,5 +509,439 @@ describe("runner synchronization", () => {
     await expect(client.request("state", "demo", { grant: testGrant })).rejects.toBeInstanceOf(
       SyncOfflineError,
     );
+  });
+});
+
+describe("shadow repository policy", () => {
+  test("excludes a nested worktree instead of failing the project", async () => {
+    const remote = await project("remote");
+    const git = new ShadowGit({
+      gitDir: remote.shadowPath,
+      workTree: remote.workTree,
+    });
+    await writeFile(join(remote.workTree, "README.md"), "line content\n");
+
+    const worktree = join(remote.workTree, ".claude", "worktrees", "feature");
+    await mkdir(worktree, { recursive: true });
+    await writeFile(join(worktree, ".git"), "gitdir: /elsewhere/.git/worktrees/feature\n");
+    await writeFile(join(worktree, "README.md"), "a whole second checkout\n");
+
+    const head = await git.snapshot("with nested worktree");
+    const paths = (await git.diff(null, head)).files.map((file) => file.path);
+    expect(paths).toEqual(["README.md"]);
+
+    expect(await readFile(join(worktree, "README.md"), "utf8")).toBe("a whole second checkout\n");
+    expect(await git.isClean()).toBe(true);
+  });
+
+  test("adopts a repository written by the removed per-line layout", async () => {
+    const remote = await project("remote");
+    await writeFile(join(remote.workTree, "README.md"), "kept\n");
+    const gitDir = join(remote.root, "shadow", "demo.git");
+    const original = new ShadowGit({ gitDir, workTree: remote.workTree });
+    const head = await original.snapshot("before the upgrade");
+
+    const git = (...args: string[]) =>
+      execFileSync("git", ["--git-dir", gitDir, ...args], { encoding: "utf8" });
+    git("update-ref", "refs/heads/lines/default/head", head);
+    git(
+      "update-ref",
+      "refs/heads/lines/default/baseline",
+      git("rev-parse", "refs/nautilus/baseline").trim(),
+    );
+    git("update-ref", "-d", "refs/nautilus/head");
+    git("update-ref", "-d", "refs/nautilus/baseline");
+    await mkdir(join(gitDir, "nautilus", "lines", "default"), {
+      recursive: true,
+    });
+    await rename(
+      join(gitDir, "nautilus", "index"),
+      join(gitDir, "nautilus", "lines", "default", "index"),
+    );
+
+    const upgraded = new ShadowGit({ gitDir, workTree: remote.workTree });
+    expect(await upgraded.isClean()).toBe(true);
+    expect(await upgraded.head()).toBe(head);
+    expect(existsSync(join(gitDir, "nautilus", "index"))).toBe(true);
+    expect(await upgraded.changedPaths(head)).toEqual([]);
+  });
+
+  test("agrees on the base with the PC across first push, later pushes, and a pull", async () => {
+    const local = await project("local");
+    const remote = await project("remote");
+    await writeFile(join(local.workTree, "README.md"), "from pc\n");
+    const agent = new SyncAgent(
+      {
+        host: "127.0.0.1",
+        port: 4100,
+        home: local.root,
+        transactionPath: join(local.root, "transactions"),
+        backupPath: join(local.root, "backups"),
+        projects: [
+          {
+            id: "demo",
+            name: "Demo",
+            localPath: local.workTree,
+            shadowPath: local.shadowPath,
+          },
+        ],
+        maxFileBytes: 10_000_000,
+        maxTotalBytes: 100_000_000,
+        maxFileCount: 10_000,
+        maxBundleBytes: 100_000_000,
+        requestTimeoutMs: 30_000,
+      },
+      () => undefined,
+    );
+    const runner = (name: string, workTree: string) =>
+      new SyncCoordinator({
+        projects: [projectConfig(workTree)],
+        shadowRoot: join(remote.root, `${name}-shadow`),
+        statePath: join(remote.root, `${name}-state`),
+        client: agentClient(agent),
+      });
+    const coordinator = runner("first", remote.workTree);
+
+    const preview = await coordinator.preview("demo", "push", testGrant, "first-preview-1");
+    expect(preview.diff?.files.map((file) => [file.path, file.status])).toEqual([
+      ["README.md", "added"],
+    ]);
+    expect(await agent.localStatus("demo")).toMatchObject({
+      neverSynced: true,
+    });
+
+    expect((await coordinator.push("demo", testGrant, "first-push-1")).status).toBe("ok");
+    expect(await agent.localStatus("demo")).toMatchObject({
+      neverSynced: false,
+      changedFiles: 0,
+    });
+
+    await writeFile(join(local.workTree, "README.md"), "from pc, again\n");
+    expect(await agent.localStatus("demo")).toMatchObject({ changedFiles: 1 });
+    expect((await coordinator.push("demo", testGrant, "second-push-1")).status).toBe("ok");
+    expect(await agent.localStatus("demo")).toMatchObject({ changedFiles: 0 });
+
+    await writeFile(join(remote.workTree, "agent.txt"), "from the agent\n");
+    await coordinator.checkpoint("demo", "session-1");
+    expect((await coordinator.pull("demo", testGrant, "first-pull-1")).status).toBe("ok");
+    expect(await readFile(join(local.workTree, "agent.txt"), "utf8")).toBe("from the agent\n");
+
+    const fresh = join(remote.root, "fresh");
+    await mkdir(fresh);
+    const again = runner("again", fresh);
+    const repeat = await again.preview("demo", "push", testGrant, "again-preview-1");
+    expect(repeat.diff?.files.map((file) => file.path)).toEqual(["README.md", "agent.txt"]);
+    expect((await again.push("demo", testGrant, "again-push-1")).status).toBe("ok");
+    expect(await readFile(join(fresh, "README.md"), "utf8")).toBe("from pc, again\n");
+  });
+
+  test("merges one-sided deletions and settles real conflicts with a chosen side", async () => {
+    const local = await project("local");
+    const remote = await project("remote");
+    await writeFile(join(local.workTree, "README.md"), "base\n");
+    await writeFile(join(local.workTree, "Alert.tsx"), "alert\n");
+    const agent = new SyncAgent(
+      {
+        host: "127.0.0.1",
+        port: 4100,
+        home: local.root,
+        transactionPath: join(local.root, "transactions"),
+        backupPath: join(local.root, "backups"),
+        projects: [
+          {
+            id: "demo",
+            name: "Demo",
+            localPath: local.workTree,
+            shadowPath: local.shadowPath,
+          },
+        ],
+        maxFileBytes: 10_000_000,
+        maxTotalBytes: 100_000_000,
+        maxFileCount: 10_000,
+        maxBundleBytes: 100_000_000,
+        requestTimeoutMs: 30_000,
+      },
+      () => undefined,
+    );
+    const coordinator = new SyncCoordinator({
+      projects: [projectConfig(remote.workTree)],
+      shadowRoot: join(remote.root, "state-shadow"),
+      statePath: join(remote.root, "sync-state"),
+      client: agentClient(agent),
+    });
+    expect((await coordinator.push("demo", testGrant, "push-first-1")).status).toBe("ok");
+    await writeFile(join(local.workTree, "README.md"), "base\nmore\n");
+    expect((await coordinator.push("demo", testGrant, "push-second-1")).status).toBe("ok");
+    await coordinator.checkpoint("demo", "session-idle");
+
+    await rm(join(local.workTree, "Alert.tsx"));
+    expect((await coordinator.push("demo", testGrant, "push-delete-1")).status).toBe("ok");
+    expect(existsSync(join(remote.workTree, "Alert.tsx"))).toBe(false);
+
+    await writeFile(join(remote.workTree, "README.md"), "runner\nmore\n");
+    await coordinator.checkpoint("demo", "session-edit");
+    await writeFile(join(local.workTree, "README.md"), "pc\nmore\n");
+    const conflict = await coordinator.push("demo", testGrant, "push-conflict-1");
+    expect(conflict.status).toBe("conflict");
+    expect(conflict.conflicts).toEqual([
+      {
+        path: "README.md",
+        reason: "content_conflict",
+        pc: "modified",
+        runner: "modified",
+      },
+    ]);
+    const resolved = await coordinator.push("demo", testGrant, "push-resolved-1", {
+      "README.md": "pc",
+    });
+    expect(resolved.status).toBe("ok");
+    expect(await readFile(join(remote.workTree, "README.md"), "utf8")).toBe("pc\nmore\n");
+
+    await writeFile(join(remote.workTree, "README.md"), "runner again\nmore\n");
+    await coordinator.checkpoint("demo", "session-pull");
+    await writeFile(join(local.workTree, "README.md"), "pc again\nmore\n");
+    const pullConflict = await coordinator.pull("demo", testGrant, "pull-conflict-1");
+    expect(pullConflict.status).toBe("conflict");
+    expect(pullConflict.conflicts?.map((entry) => entry.path)).toEqual(["README.md"]);
+    const pulled = await coordinator.pull("demo", testGrant, "pull-resolved-1", {
+      "README.md": "runner",
+    });
+    expect(pulled.status).toBe("ok");
+    expect(await readFile(join(local.workTree, "README.md"), "utf8")).toBe("runner again\nmore\n");
+  });
+
+  test("undoes a pull on both sides, so the same changes pull again", async () => {
+    const local = await project("local");
+    const remote = await project("remote");
+    await writeFile(join(local.workTree, "README.md"), "base\n");
+    const agent = new SyncAgent(
+      {
+        host: "127.0.0.1",
+        port: 4100,
+        home: local.root,
+        transactionPath: join(local.root, "transactions"),
+        backupPath: join(local.root, "backups"),
+        projects: [
+          {
+            id: "demo",
+            name: "Demo",
+            localPath: local.workTree,
+            shadowPath: local.shadowPath,
+          },
+        ],
+        maxFileBytes: 10_000_000,
+        maxTotalBytes: 100_000_000,
+        maxFileCount: 10_000,
+        maxBundleBytes: 100_000_000,
+        requestTimeoutMs: 30_000,
+      },
+      () => undefined,
+    );
+    const coordinator = new SyncCoordinator({
+      projects: [projectConfig(remote.workTree)],
+      shadowRoot: join(remote.root, "state-shadow"),
+      statePath: join(remote.root, "sync-state"),
+      client: agentClient(agent),
+    });
+    expect((await coordinator.push("demo", testGrant, "push-first-1")).status).toBe("ok");
+
+    expect((await agent.localStatus("demo")).undoablePull).toBeNull();
+
+    await writeFile(join(remote.workTree, "README.md"), "runner\n");
+    await writeFile(join(remote.workTree, "agent.txt"), "from the agent\n");
+    await coordinator.checkpoint("demo", "session-1");
+
+    await writeFile(join(local.workTree, "README.md"), "pc\n");
+    const conflict = await coordinator.pull("demo", testGrant, "pull-conflict-1");
+    expect(conflict.status).toBe("conflict");
+    const runnerHead = (await coordinator.preview("demo", "pull", testGrant)).state?.head ?? "";
+    const compared = await agent.compare("demo", runnerHead, "README.md");
+    expect(compared.hunks.flatMap((hunk) => hunk.lines)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "deletion", content: "pc" }),
+        expect.objectContaining({ type: "addition", content: "runner" }),
+      ]),
+    );
+    await writeFile(join(local.workTree, "README.md"), "base\n");
+
+    expect((await coordinator.pull("demo", testGrant, "pull-1")).status).toBe("ok");
+    const undoable = (await agent.localStatus("demo")).undoablePull;
+    expect(undoable).not.toBeNull();
+    if (!undoable) return;
+
+    await coordinator.rewindBase("demo", undoable.remoteHead, undoable.previousBaseHead);
+    await expect(
+      coordinator.rewindBase("demo", undoable.remoteHead, undoable.previousBaseHead),
+    ).rejects.toMatchObject({ code: "stale_base_head" });
+    const status = await agent.undoPull("demo", undoable.requestId);
+    expect(status).toMatchObject({ changedFiles: 0, undoablePull: null });
+    expect(await readFile(join(local.workTree, "README.md"), "utf8")).toBe("base\n");
+    expect(existsSync(join(local.workTree, "agent.txt"))).toBe(false);
+    await expect(agent.undoPull("demo", undoable.requestId)).rejects.toMatchObject({
+      code: "pull_not_undoable",
+    });
+    expect((await coordinator.history("demo")).at(-1)).toMatchObject({
+      direction: "pull",
+      undone: true,
+    });
+
+    expect(await readFile(join(remote.workTree, "agent.txt"), "utf8")).toBe("from the agent\n");
+    expect((await coordinator.pull("demo", testGrant, "pull-2")).status).toBe("ok");
+    expect(await readFile(join(local.workTree, "agent.txt"), "utf8")).toBe("from the agent\n");
+    expect(await readFile(join(local.workTree, "README.md"), "utf8")).toBe("runner\n");
+  });
+
+  test("refuses to undo a pull once the PC has changed since", async () => {
+    const local = await project("local");
+    const remote = await project("remote");
+    await writeFile(join(local.workTree, "README.md"), "base\n");
+    const agent = new SyncAgent(
+      {
+        host: "127.0.0.1",
+        port: 4100,
+        home: local.root,
+        transactionPath: join(local.root, "transactions"),
+        backupPath: join(local.root, "backups"),
+        projects: [
+          {
+            id: "demo",
+            name: "Demo",
+            localPath: local.workTree,
+            shadowPath: local.shadowPath,
+          },
+        ],
+        maxFileBytes: 10_000_000,
+        maxTotalBytes: 100_000_000,
+        maxFileCount: 10_000,
+        maxBundleBytes: 100_000_000,
+        requestTimeoutMs: 30_000,
+      },
+      () => undefined,
+    );
+    const coordinator = new SyncCoordinator({
+      projects: [projectConfig(remote.workTree)],
+      shadowRoot: join(remote.root, "state-shadow"),
+      statePath: join(remote.root, "sync-state"),
+      client: agentClient(agent),
+    });
+    expect((await coordinator.push("demo", testGrant, "push-first-1")).status).toBe("ok");
+    await writeFile(join(remote.workTree, "agent.txt"), "from the agent\n");
+    await coordinator.checkpoint("demo", "session-1");
+    expect((await coordinator.pull("demo", testGrant, "pull-1")).status).toBe("ok");
+    const undoable = (await agent.localStatus("demo")).undoablePull;
+    expect(undoable).not.toBeNull();
+
+    await writeFile(join(local.workTree, "agent.txt"), "edited on the pc\n");
+    expect((await agent.localStatus("demo")).undoablePull).toBeNull();
+    await expect(agent.undoPull("demo", undoable?.requestId ?? "")).rejects.toMatchObject({
+      code: "pull_not_undoable",
+    });
+    expect(await readFile(join(local.workTree, "agent.txt"), "utf8")).toBe("edited on the pc\n");
+  });
+
+  test("adopts runner edits no checkpoint captured, unless an agent is still running", async () => {
+    const local = await project("local");
+    const remote = await project("remote");
+    await writeFile(join(local.workTree, "README.md"), "base\n");
+    const agent = new SyncAgent(
+      {
+        host: "127.0.0.1",
+        port: 4100,
+        home: local.root,
+        transactionPath: join(local.root, "transactions"),
+        backupPath: join(local.root, "backups"),
+        projects: [
+          {
+            id: "demo",
+            name: "Demo",
+            localPath: local.workTree,
+            shadowPath: local.shadowPath,
+          },
+        ],
+        maxFileBytes: 10_000_000,
+        maxTotalBytes: 100_000_000,
+        maxFileCount: 10_000,
+        maxBundleBytes: 100_000_000,
+        requestTimeoutMs: 30_000,
+      },
+      () => undefined,
+    );
+    let running = false;
+    const coordinator = new SyncCoordinator({
+      projects: [projectConfig(remote.workTree)],
+      shadowRoot: join(remote.root, "state-shadow"),
+      statePath: join(remote.root, "sync-state"),
+      client: agentClient(agent),
+      busy: () => running,
+    });
+    expect((await coordinator.push("demo", testGrant, "adopt-first-1")).status).toBe("ok");
+
+    await writeFile(join(remote.workTree, "agent.txt"), "unfinished\n");
+    running = true;
+    await expect(coordinator.push("demo", testGrant, "adopt-busy-1")).rejects.toMatchObject({
+      code: "agent_running",
+    });
+
+    running = false;
+    const preview = await coordinator.preview("demo", "pull", testGrant, "adopt-preview-1");
+    expect(preview.diff?.files.map((file) => file.path)).toEqual(["agent.txt"]);
+    expect((await coordinator.pull("demo", testGrant, "adopt-pull-1")).status).toBe("ok");
+    expect(await readFile(join(local.workTree, "agent.txt"), "utf8")).toBe("unfinished\n");
+
+    await writeFile(join(remote.workTree, "agent.txt"), "unfinished, again\n");
+    await writeFile(join(local.workTree, "README.md"), "from pc\n");
+    expect((await coordinator.push("demo", testGrant, "adopt-push-1")).status).toBe("ok");
+    expect(await readFile(join(remote.workTree, "agent.txt"), "utf8")).toBe("unfinished, again\n");
+    expect(await readFile(join(remote.workTree, "README.md"), "utf8")).toBe("from pc\n");
+  });
+
+  test("leaves out what the project's .gitignore ignores, without measuring it", async () => {
+    const remote = await project("remote");
+    const git = new ShadowGit({
+      gitDir: remote.shadowPath,
+      workTree: remote.workTree,
+      limits: { maxFileBytes: 1_000 },
+    });
+    await writeFile(join(remote.workTree, ".gitignore"), "target/\n*.local\n");
+    await writeFile(join(remote.workTree, "README.md"), "hello\n");
+    await writeFile(join(remote.workTree, "notes.txt"), "keep\n");
+
+    await mkdir(join(remote.workTree, "app", "target", "debug"), {
+      recursive: true,
+    });
+    await writeFile(join(remote.workTree, "app", "target", "debug", "build"), "x".repeat(5_000));
+    const first = await git.snapshot("first");
+    expect((await git.diff(null, first)).files.map((file) => file.path)).toEqual([
+      ".gitignore",
+      "README.md",
+      "notes.txt",
+    ]);
+    expect(await git.isClean()).toBe(true);
+
+    await writeFile(join(remote.workTree, ".gitignore"), "target/\n*.local\nnotes.txt\n");
+    const second = await git.snapshot("second");
+    expect((await git.diff(first, second)).files.map((file) => [file.path, file.status])).toEqual([
+      [".gitignore", "modified"],
+      ["notes.txt", "deleted"],
+    ]);
+    expect(await readFile(join(remote.workTree, "notes.txt"), "utf8")).toBe("keep\n");
+    expect(await git.isClean()).toBe(true);
+  });
+
+  test("sends only the commits after a base the receiver already holds", async () => {
+    const remote = await project("remote");
+    const git = new ShadowGit({
+      gitDir: remote.shadowPath,
+      workTree: remote.workTree,
+    });
+    await writeFile(join(remote.workTree, "seed.txt"), "seed\n".repeat(500));
+    const base = await git.snapshot("base");
+    await writeFile(join(remote.workTree, "later.txt"), "later\n");
+    const head = await git.snapshot("later");
+
+    const directory = join(remote.root, "bundles");
+    const full = await git.createBundle(head, directory, null);
+    const incremental = await git.createBundle(head, directory, base);
+    expect(incremental.bytes.length).toBeLessThan(full.bytes.length);
   });
 });
