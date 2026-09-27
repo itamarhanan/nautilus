@@ -24,6 +24,7 @@ import {
   withoutProject,
   withProject,
 } from "../src/lib/state";
+import { editablePath } from "../src/lib/editor";
 
 const settings: DesktopSettings = {
   runnerUrl: "https://8080-studio.cloudspaces.litng.ai",
@@ -242,5 +243,18 @@ describe("project folders", () => {
     expect(rankFolders("", items).map((entry) => entry.item.name)).toEqual(
       items.map((item) => item.name),
     );
+  });
+});
+
+describe("opening a conflicting file", () => {
+  it("opens only files inside the project that do not run when opened", () => {
+    expect(editablePath("/home/me/shop/", "src/app.ts")).toBe("/home/me/shop/src/app.ts");
+    expect(editablePath("/home/me/shop", "README")).toBe("/home/me/shop/README");
+    expect(editablePath("/home/me/shop", "../secrets.txt")).toBeNull();
+    expect(editablePath("/home/me/shop", "/etc/passwd")).toBeNull();
+    expect(editablePath("/home/me/shop", "src//app.ts")).toBeNull();
+    expect(editablePath("/home/me/shop", "scripts/deploy.sh")).toBeNull();
+    expect(editablePath("/home/me/shop", "Launch.DESKTOP")).toBeNull();
+    expect(editablePath("/home/me/shop", "setup.exe")).toBeNull();
   });
 });
