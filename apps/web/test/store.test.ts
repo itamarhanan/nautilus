@@ -148,6 +148,31 @@ describe("bootstrap", () => {
     expect(store.getState().auth).toBe("unauthenticated");
   });
 
+  test("a 401 keeps the pairing code a link opened the app with", async () => {
+    stubApi({
+      "GET /api/bootstrap": () => json(401, { error: "unauthorized" }),
+    });
+    const location = { pathname: "/", search: "?pair=ABCD-1234", hash: "" };
+    vi.stubGlobal("window", {
+      location,
+      history: {
+        replaceState: (_state: unknown, _title: string, url: string) => {
+          location.search = url.includes("?") ? url.slice(url.indexOf("?")) : "";
+        },
+        pushState: () => undefined,
+      },
+      localStorage: {
+        getItem: () => null,
+        setItem: () => undefined,
+        removeItem: () => undefined,
+      },
+    });
+    const store = createWorkspaceStore();
+    await store.getState().actions.bootstrap();
+    expect(store.getState().auth).toBe("unauthenticated");
+    expect(location.search).toBe("?pair=ABCD-1234");
+  });
+
   test("an unreachable runner shows the outage screen", async () => {
     stubApi({
       "GET /api/bootstrap": () => json(502, { message: "Bad gateway" }),

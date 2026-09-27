@@ -106,9 +106,13 @@ export function authActions(set: SetState, get: GetState): AuthActions {
       set({ ...initialData, auth: "unauthenticated", online: get().online });
 
       rememberDrafts({});
+      // A pairing link opens here first: the phone is not linked yet, so the
+      // runner refuses the bootstrap. The code has to outlive that, or the
+      // pairing screen never sees it.
       writeLocation(
         { projectId: null, sessionId: null, view: "chat", isInfoOpen: false },
         "replace",
+        ["pair"],
       );
     },
   };
