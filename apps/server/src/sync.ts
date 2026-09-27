@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   ProjectConfig,
@@ -6,9 +7,22 @@ import type {
   SyncEvent,
   SyncRequest,
   SyncResponse,
+  SyncResolutions,
   SyncStatusResponse,
+  SyncTransaction,
 } from "@nautilus/types";
-import { readJson, ShadowGit, type ShadowGitLimits } from "@nautilus/shadow-git";
+import {
+  commitPattern,
+  LockBusyError,
+  type MergeConflict,
+  type MergePick,
+  pruneFiles,
+  readJson,
+  ShadowGit,
+  withLock,
+  writeJson,
+  type ShadowGitLimits,
+} from "@nautilus/shadow-git";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -251,6 +265,463 @@ export class SyncCoordinator {
     Object.assign(this.options, hooks);
   }
 
+  async preview(
+    projectId: string,
+    direction: "pull" | "push",
+    grant: string,
+    requestId: string = randomUUID(),
+  ): Promise<SyncResponse> {
+    return this.withLock(projectId, async () => {
+      this.project(projectId);
+      if (direction === "push") {
+        return this.options.client.request("preview", projectId, {
+          grant,
+          requestId,
+          payload: { runnerBase: await this.base(projectId) },
+        });
+      }
+      const git = await this.git(this.project(projectId));
+      await this.adoptWorktree(projectId, git);
+      const remoteHead = (await git.head()) ?? (await git.baseline());
+      const synchronizedBase = await this.base(projectId);
+      const diff = await git.diff(synchronizedBase, remoteHead);
+      return {
+        version: 1,
+        requestId,
+        status: "ok",
+        state: {
+          projectId,
+          head: remoteHead,
+          baseHead: synchronizedBase,
+          dirty: !(await git.isClean()),
+          changes: diff,
+          excludedRepositories: await git.excludedRepositories(),
+        },
+        diff,
+      };
+    });
+  }
+
+  async pull(
+    projectId: string,
+    grant: string,
+    requestId: string = randomUUID(),
+    resolutions: SyncResolutions = {},
+  ): Promise<SyncResponse> {
+    return this.withCachedResult(projectId, requestId, "pull", () =>
+      this.pullInternal(projectId, grant, requestId, resolutions),
+    );
+  }
+
+  async rewindBase(projectId: string, from: string, to: string): Promise<void> {
+    await this.withLock(projectId, async () => {
+      const git = await this.git(this.project(projectId));
+      if ((await this.base(projectId)) !== from) {
+        throw new SyncCoordinatorError(
+          "stale",
+          "stale_base_head",
+          "The runner has synchronized since this pull",
+        );
+      }
+      if (!commitPattern.test(to) || !(await git.isAncestor(to, from))) {
+        throw new SyncCoordinatorError(
+          "invalid",
+          "invalid_base_head",
+          "The earlier base is not part of this project's history",
+        );
+      }
+      await this.setBase(projectId, to);
+      const path = this.eventsPath(projectId);
+      const events = await readJson<SyncEvent[]>(path, []);
+      let pulled = events.length - 1;
+      while (pulled >= 0) {
+        const event = events[pulled];
+        if (event?.direction === "pull" && event.status === "ok" && event.baseHead === from) break;
+        pulled -= 1;
+      }
+      const lastPull = events[pulled];
+      if (pulled !== -1 && lastPull) {
+        const event = { ...lastPull, undone: true };
+        events[pulled] = event;
+        await writeJson(path, events);
+        await this.options.onEvent?.(event);
+      }
+    });
+  }
+
+  private async pullInternal(
+    projectId: string,
+    grant: string,
+    requestId: string,
+    resolutions: SyncResolutions = {},
+  ): Promise<SyncResponse> {
+    this.project(projectId);
+    const git = await this.git(this.project(projectId));
+    await this.adoptWorktree(projectId, git);
+    const local = await this.options.client.request("preview", projectId, {
+      grant,
+      requestId: `${requestId}-preview`,
+      payload: { runnerBase: await this.base(projectId) },
+    });
+
+    if (local.status !== "ok") return { ...local, requestId };
+    if (!local.state)
+      throw new SyncCoordinatorError("failed", "pc_state_failed", "PC returned no state");
+    const remoteHead = (await git.head()) ?? (await git.baseline());
+    const synchronizedBase = await this.base(projectId);
+    if (synchronizedBase !== null && local.state.baseHead !== synchronizedBase) {
+      throw new SyncCoordinatorError(
+        "stale",
+        "base_mismatch",
+        "PC and runner synchronization bases differ",
+      );
+    }
+    const bundle = await git.createBundle(
+      remoteHead,
+      this.stateDir(projectId, "bundles"),
+      synchronizedBase,
+    );
+    let imported: SyncResponse;
+    try {
+      imported = await this.options.client.requestWithBundle(bundle, projectId, {
+        grant,
+        baseHead: synchronizedBase,
+        requestId: `${requestId}-import`,
+      });
+    } finally {
+      await rm(join(this.stateDir(projectId, "bundles"), `${remoteHead}.bundle`), {
+        force: true,
+      });
+    }
+    if (imported.status !== "ok") return { ...imported, requestId };
+    const preflight = await this.options.client.request("preflight", projectId, {
+      grant,
+      baseHead: synchronizedBase,
+      expectedLocalHead: local.state.head,
+      expectedRemoteHead: remoteHead,
+      requestId: `${requestId}-preflight`,
+
+      payload: { resolutions },
+    });
+    if (preflight.status !== "ok" || !preflight.applyToken) {
+      return { ...preflight, requestId };
+    }
+    const applied = await this.options.client.request("apply", projectId, {
+      grant,
+      baseHead: synchronizedBase,
+      expectedLocalHead: local.state.head,
+      expectedRemoteHead: remoteHead,
+      requestId: `${requestId}-apply`,
+      payload: { applyToken: preflight.applyToken },
+    });
+    if (applied.status === "ok") await this.setBase(projectId, remoteHead);
+    return {
+      ...applied,
+      requestId,
+      ...(preflight.diff ? { diff: preflight.diff } : {}),
+      ...(applied.status === "conflict" ? { conflicts: applied.conflicts ?? [] } : {}),
+    };
+  }
+
+  async push(
+    projectId: string,
+    grant: string,
+    requestId: string = randomUUID(),
+    resolutions: SyncResolutions = {},
+  ): Promise<SyncResponse> {
+    return this.withCachedResult(projectId, requestId, "push", () =>
+      this.pushInternal(projectId, grant, requestId, resolutions),
+    );
+  }
+
+  private async withCachedResult(
+    projectId: string,
+    requestId: string,
+    direction: "pull" | "push",
+    action: () => Promise<SyncResponse>,
+  ): Promise<SyncResponse> {
+    return this.withLock(projectId, async () => {
+      const cached = await this.cachedResult(projectId, requestId);
+      if (cached) return { ...cached, replayed: true };
+      try {
+        const result = await action();
+        await this.cacheResult(projectId, requestId, result);
+        await this.recordResult(result, projectId, direction, requestId);
+        await this.pruneHistory(projectId);
+        return result;
+      } catch (error) {
+        await this.failureEvent(projectId, direction, requestId, error);
+        throw error;
+      }
+    });
+  }
+
+  private async pushInternal(
+    projectId: string,
+    grant: string,
+    requestId: string,
+    resolutions: SyncResolutions = {},
+  ): Promise<SyncResponse> {
+    this.project(projectId);
+    const git = await this.git(this.project(projectId));
+    await this.adoptWorktree(projectId, git);
+    const localState = await this.options.client.request("create_bundle", projectId, {
+      grant,
+      requestId,
+      payload: { runnerBase: await this.base(projectId) },
+    });
+    if (localState.status !== "ok" || !localState.bundle) return localState;
+    const localBundle: SyncBundle = {
+      head: localState.bundle.head,
+      sha256: localState.bundle.sha256,
+      bytes: Buffer.from(localState.bundle.bytesBase64, "base64"),
+    };
+    const remoteHead = (await git.head()) ?? (await git.baseline());
+    // The base cannot change between here and the transaction write: nothing
+    // below writes it until the try block, which is why one read serves both
+    // the merge base and the transaction's previousBaseHead.
+    const previousBase = await this.base(projectId);
+    const mergeBase = previousBase ?? (await git.mergeBase());
+
+    await this.requireCleanWorktree(git);
+    await git.importBundle(localBundle, previousBase);
+
+    const localChanges = await git.diff(localState.state?.baseHead ?? null, localBundle.head);
+
+    const preflight = await this.preflightMerge(git, {
+      mergeBase,
+      remoteHead,
+      localBundle,
+      resolutions,
+    });
+    if (!preflight.clean || !preflight.tree) {
+      return this.conflictResponse(git, requestId, mergeBase, localBundle, preflight.conflicts);
+    }
+    const paths = this.transactionPaths(projectId, requestId);
+    const transaction = this.buildTransaction({
+      requestId,
+      projectId,
+      mergeBase,
+      localBundle,
+      remoteHead,
+      preflightTree: preflight.tree,
+      recoveryPath: paths.recovery,
+      previousBaseHead: previousBase,
+    });
+    await writeJson(paths.recovery, { head: remoteHead });
+    await writeJson(paths.transaction, transaction);
+    const nextBase =
+      previousBase === null ? (localState.state?.baseHead ?? localBundle.head) : localBundle.head;
+
+    try {
+      await this.assertRemoteUnchanged(git, remoteHead);
+      const mergedHead = await git.applyTree(
+        preflight.tree,
+        [remoteHead, localBundle.head],
+        "Nautilus push merge",
+      );
+      await this.setBase(projectId, nextBase);
+      transaction.status = "committed";
+      transaction.updatedAt = new Date().toISOString();
+      await writeJson(paths.transaction, transaction);
+
+      await this.options.client
+        .request("state", projectId, {
+          grant,
+          requestId: `${requestId}-base`,
+          payload: { runnerBase: await this.base(projectId) },
+        })
+        .catch(() => undefined);
+
+      if (previousBase === null) {
+        await this.options.onFirstSync?.(projectId);
+      }
+      const result: SyncResponse = {
+        version: 1,
+        requestId,
+        status: "ok",
+        state: {
+          projectId,
+          head: mergedHead,
+          baseHead: nextBase,
+          dirty: false,
+          changes: localChanges,
+        },
+        diff: localState.diff ?? localChanges,
+      };
+      return result;
+    } catch (error) {
+      transaction.status = "failed";
+      transaction.updatedAt = new Date().toISOString();
+      await git.restoreHead(remoteHead).catch(() => undefined);
+      if (previousBase === null) {
+        await rm(this.basePath(projectId), { force: true });
+      } else {
+        await this.setBase(projectId, previousBase);
+      }
+      await writeJson(paths.transaction, transaction);
+      throw error;
+    }
+  }
+
+  private async requireCleanWorktree(git: ShadowGit): Promise<void> {
+    if (!(await git.isClean())) {
+      throw new SyncCoordinatorError(
+        "conflict",
+        "remote_worktree_dirty",
+        "Runner worktree changed during the push; try again",
+      );
+    }
+  }
+
+  private async assertRemoteUnchanged(git: ShadowGit, remoteHead: string): Promise<void> {
+    if ((await git.head()) !== remoteHead) {
+      throw new SyncCoordinatorError(
+        "stale",
+        "stale_remote_head",
+        "Remote head changed before apply",
+      );
+    }
+    if (!(await git.isClean())) {
+      throw new SyncCoordinatorError(
+        "conflict",
+        "remote_worktree_dirty",
+        "Remote worktree changed before apply",
+      );
+    }
+  }
+
+  private picksOf(resolutions: SyncResolutions): Record<string, MergePick> {
+    return Object.fromEntries(
+      Object.entries(resolutions).map(([path, side]): [string, MergePick] => [
+        path,
+        side === "runner" ? "ours" : "theirs",
+      ]),
+    );
+  }
+
+  private preflightMerge(
+    git: ShadowGit,
+    input: {
+      mergeBase: string;
+      remoteHead: string;
+      localBundle: SyncBundle;
+      resolutions: SyncResolutions;
+    },
+  ) {
+    return git.mergeTree(
+      input.mergeBase,
+      input.remoteHead,
+      input.localBundle.head,
+      this.picksOf(input.resolutions),
+    );
+  }
+
+  private async conflictResponse(
+    git: ShadowGit,
+    requestId: string,
+    mergeBase: string,
+    localBundle: SyncBundle,
+    conflicts: MergeConflict[] | undefined,
+  ): Promise<SyncResponse> {
+    return {
+      version: 1,
+      requestId,
+      status: "conflict",
+      conflicts: (conflicts ?? []).map((entry) => ({
+        path: entry.path,
+        reason: entry.reason,
+        runner: entry.ours,
+        pc: entry.theirs,
+      })),
+      diff: await git.diff(mergeBase, localBundle.head),
+    };
+  }
+
+  private transactionPaths(
+    projectId: string,
+    requestId: string,
+  ): { recovery: string; transaction: string } {
+    return {
+      recovery: join(this.stateDir(projectId, "recovery"), `${requestId}.json`),
+      transaction: join(this.stateDir(projectId, "transactions"), `${requestId}.json`),
+    };
+  }
+
+  private buildTransaction(input: {
+    requestId: string;
+    projectId: string;
+    mergeBase: string;
+    localBundle: SyncBundle;
+    remoteHead: string;
+    preflightTree: string;
+    recoveryPath: string;
+    previousBaseHead: string | null;
+  }): SyncTransaction {
+    const now = new Date().toISOString();
+    return {
+      requestId: input.requestId,
+      projectId: input.projectId,
+      direction: "push",
+      status: "prepared",
+      baseHead: input.mergeBase,
+      expectedLocalHead: input.localBundle.head,
+      expectedRemoteHead: input.remoteHead,
+      preflight: input.preflightTree,
+      recoveryPath: input.recoveryPath,
+      previousBaseHead: input.previousBaseHead,
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  private async adoptWorktree(projectId: string, git: ShadowGit): Promise<void> {
+    if ((await this.base(projectId)) === null || (await git.isClean())) return;
+    if (this.options.busy?.(projectId)) {
+      throw new SyncCoordinatorError(
+        "conflict",
+        "agent_running",
+        "An agent is still editing the runner; wait for it to finish or stop it",
+      );
+    }
+    await this.commitWorktree(projectId, git, "recovered", "Nautilus recovered checkpoint");
+  }
+
+  private async commitWorktree(
+    projectId: string,
+    git: ShadowGit,
+    sessionId: string,
+    message: string,
+  ): Promise<Checkpoint> {
+    const intentPath = this.pendingCheckpointPath(projectId);
+    const previousHead = await git.head();
+    await writeJson(intentPath, {
+      sessionId,
+      previousHead,
+      createdAt: new Date().toISOString(),
+    });
+    const commit = await git.snapshot(message);
+    await this.recordCheckpoint(projectId, commit);
+    await rm(intentPath, { force: true });
+    return { commit, previousHead };
+  }
+
+  private async recordCheckpoint(projectId: string, head: string): Promise<void> {
+    await this.record({
+      requestId: randomUUID(),
+      projectId,
+      direction: "system",
+      status: "ok",
+      baseHead: await this.base(projectId),
+      localHead: null,
+      remoteHead: head,
+      errorCode: null,
+      conflicts: [],
+      createdAt: new Date().toISOString(),
+      committedAt: new Date().toISOString(),
+    });
+  }
+
   async hasCode(projectId: string): Promise<boolean> {
     this.project(projectId);
     return (await this.base(projectId)) !== null;
@@ -283,6 +754,48 @@ export class SyncCoordinator {
     return readJson<SyncEvent[]>(this.eventsPath(projectId), []);
   }
 
+  private async pruneHistory(projectId: string): Promise<void> {
+    const root = this.projectState(projectId);
+    await pruneFiles(join(root, "results"), { keep: 200, suffix: ".json" });
+    await pruneFiles(join(root, "recovery"), { keep: 3, suffix: ".json" });
+    await pruneFiles(join(root, "transactions"), {
+      keep: 50,
+      suffix: ".json",
+      protect: async (path) => {
+        const transaction = await readJson<SyncTransaction | undefined>(path, undefined);
+        return transaction?.status === "prepared" || transaction?.status === "applied";
+      },
+    });
+  }
+
+  private async cachedResult(
+    projectId: string,
+    requestId: string,
+  ): Promise<SyncResponse | undefined> {
+    return readJson<SyncResponse | undefined>(
+      join(this.stateDir(projectId, "results"), `${requestId}.json`),
+      undefined,
+    );
+  }
+
+  private async cacheResult(
+    projectId: string,
+    requestId: string,
+    result: SyncResponse,
+  ): Promise<void> {
+    await writeJson(join(this.stateDir(projectId, "results"), `${requestId}.json`), result);
+  }
+
+  private async withLock<T>(projectId: string, action: () => Promise<T>): Promise<T> {
+    try {
+      return await withLock(join(this.options.statePath, `${projectId}.lock`), action);
+    } catch (error) {
+      if (error instanceof LockBusyError)
+        throw new SyncCoordinatorError("conflict", "project_busy", error.message);
+      throw error;
+    }
+  }
+
   private async git(project: ProjectConfig): Promise<ShadowGit> {
     const existing = this.gitByProject.get(project.id);
     if (existing) return existing;
@@ -311,15 +824,94 @@ export class SyncCoordinator {
     return readJson<string | null>(this.basePath(projectId), null);
   }
 
+  private async setBase(projectId: string, head: string): Promise<void> {
+    await writeJson(this.basePath(projectId), head);
+  }
+
   private projectState(projectId: string): string {
     return join(this.options.statePath, projectId);
+  }
+
+  private stateDir(
+    projectId: string,
+    kind: "bundles" | "recovery" | "results" | "transactions",
+  ): string {
+    return join(this.projectState(projectId), kind);
   }
 
   private eventsPath(projectId: string): string {
     return join(this.projectState(projectId), "events.json");
   }
 
+  private pendingCheckpointPath(projectId: string): string {
+    return join(this.projectState(projectId), "checkpoint.pending.json");
+  }
+
   private basePath(projectId: string): string {
     return join(this.projectState(projectId), "base.json");
+  }
+
+  private async recordResult(
+    result: SyncResponse,
+    projectId: string,
+    direction: "pull" | "push",
+    requestId: string,
+  ): Promise<void> {
+    await this.record({
+      requestId,
+      projectId,
+      direction,
+      status: result.status,
+      baseHead: result.state?.baseHead ?? null,
+      localHead: result.state?.head ?? null,
+      remoteHead: result.state?.head ?? null,
+      errorCode: result.error?.code ?? null,
+      conflicts: result.conflicts ?? result.error?.conflicts ?? [],
+      createdAt: new Date().toISOString(),
+      committedAt: result.status === "ok" ? new Date().toISOString() : null,
+    });
+  }
+
+  private async failureEvent(
+    projectId: string,
+    direction: "pull" | "push",
+    requestId: string,
+    error: unknown,
+  ): Promise<void> {
+    const status =
+      error instanceof SyncOfflineError
+        ? "offline"
+        : error instanceof SyncCoordinatorError
+          ? error.status
+          : "failed";
+    const code =
+      error instanceof SyncCoordinatorError
+        ? error.code
+        : error instanceof SyncOfflineError
+          ? error.code
+          : "sync_operation_failed";
+    await this.record({
+      requestId,
+      projectId,
+      direction,
+      status,
+      baseHead: await this.base(projectId),
+      localHead: null,
+      remoteHead: null,
+      errorCode: code,
+      conflicts: [],
+      createdAt: new Date().toISOString(),
+      committedAt: null,
+    });
+  }
+
+  private async record(event: SyncEvent): Promise<void> {
+    const path = this.eventsPath(event.projectId);
+    const events = await readJson<SyncEvent[]>(path, []);
+    const existing = events.findIndex((entry) => entry.requestId === event.requestId);
+    if (existing === -1) events.push(event);
+    else events[existing] = event;
+    await writeJson(path, events.slice(-1000));
+    await this.options.onEvent?.(event);
   }
 }
