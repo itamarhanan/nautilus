@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
+import { AgentProcess, agentExitMessage, createLaunchKey } from "../src/lib/agent";
 import { AgentApi, ApiError, ControlApi } from "../src/lib/api";
 import { ControlChannel } from "../src/lib/control";
 import { friendlyError } from "../src/lib/errors";
@@ -487,6 +488,78 @@ describe("control channel", () => {
       /could not be resolved/,
     );
     expect(channel.current.phase).toBe("offline");
+  });
+});
+
+describe("sync agent process", () => {
+  it("passes a fresh launch key on stdin and waits for ready", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(() => Promise.resolve(jsonResponse({ ok: true }))),
+    );
+    const { spawn, children } = fakeSpawner((child) => {
+      child.handlers.onStdout?.('{"event":"ready","port":4100}');
+    });
+    const agent = new AgentProcess({ spawn });
+    await agent.start();
+    expect(agent.current.phase).toBe("running");
+    expect(children[0]?.args).toEqual(["--launch-key-stdin"]);
+    const written = children[0]?.written[0] ?? "";
+    expect(written).toMatch(/^[A-Za-z0-9_-]{43}\n$/);
+    await agent.stop();
+    expect(children[0]?.killed).toBe(true);
+  });
+
+  it("shares one launch between concurrent starts and ignores a replaced child's exit", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(() => Promise.resolve(jsonResponse({ ok: true }))),
+    );
+    const { spawn, children } = fakeSpawner((child) => {
+      child.handlers.onStdout?.('{"event":"ready","port":4100}');
+    });
+    const agent = new AgentProcess({ spawn });
+    const [first, second] = await Promise.all([agent.start(), agent.start()]);
+    expect(first).toBe(second);
+    expect(children).toHaveLength(1);
+    expect(agent.current.phase).toBe("running");
+  });
+
+  it("stops an agent left running by a reloaded webview before starting", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(() => Promise.resolve(jsonResponse({ ok: true }))),
+    );
+    const { spawn } = fakeSpawner((child) => {
+      child.handlers.onStdout?.('{"event":"ready","port":4100}');
+    });
+    let stored: number | null = 4242;
+    const killed: number[] = [];
+    const agent = new AgentProcess({
+      spawn: async (...args) => ({ ...(await spawn(...args)), pid: 5151 }),
+      previous: {
+        read: () => stored,
+        write: (pid) => {
+          stored = pid;
+        },
+        kill: (pid) => {
+          killed.push(pid);
+          return Promise.resolve();
+        },
+      },
+    });
+    await agent.start();
+    expect(killed).toEqual([4242]);
+    expect(stored).toBe(5151);
+    await agent.stop();
+    expect(stored).toBeNull();
+  });
+
+  it("explains a taken port", () => {
+    expect(
+      agentExitMessage(1, "Error: listen EADDRINUSE: address already in use 127.0.0.1:4100"),
+    ).toMatch(/already in use/);
+    expect(createLaunchKey()).not.toBe(createLaunchKey());
   });
 });
 
