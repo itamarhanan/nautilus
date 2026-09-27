@@ -148,6 +148,7 @@ export class SessionService {
   private readonly registry: Registry;
   private readonly projects: ReadonlyMap<string, ProjectConfig>;
   private readonly logger: Logger;
+  private readonly workspace: SessionWorkspace | undefined;
   private readonly listeners = new Map<string, Set<Listener>>();
   private readonly subagents = new Map<string, string | null>();
   private consuming = false;
@@ -158,11 +159,14 @@ export class SessionService {
     registry: Registry,
     projects: ReadonlyMap<string, ProjectConfig>,
     logger: Logger,
+
+    workspace?: SessionWorkspace,
   ) {
     this.openCode = openCode;
     this.registry = registry;
     this.projects = projects;
     this.logger = logger;
+    this.workspace = workspace;
   }
 
   private projectPath(projectId: string): string {
@@ -253,6 +257,9 @@ export class SessionService {
       );
       return;
     }
+    if (TERMINAL_STATUS[translated.type] && this.workspace) {
+      if (await this.checkpointOnTerminal(session)) return;
+    }
     const persisted = this.registry.appendAgentSessionEvent(
       session.id,
       translated.type,
@@ -261,6 +268,31 @@ export class SessionService {
     const status = TERMINAL_STATUS[translated.type];
     if (status) this.registry.setAgentSessionStatus(session.id, status, persisted.sequence);
     this.publish(persisted);
+  }
+
+  private async checkpointOnTerminal(session: SessionRecord): Promise<boolean> {
+    if (!this.workspace) return false;
+    this.registry.updateProjectState(session.projectId, "checkpointing", null);
+    try {
+      const checkpoint = await this.workspace.checkpoint(session.projectId, session.id);
+      this.registry.updateProjectState(session.projectId, "idle", null);
+      this.publish(
+        this.registry.appendAgentSessionEvent(session.id, "session.checkpoint", {
+          ...checkpoint,
+          sessionId: session.id,
+        }),
+      );
+      return false;
+    } catch (error) {
+      this.registry.updateProjectState(session.projectId, "unhealthy", "checkpoint_failed");
+      const failed = this.registry.appendAgentSessionEvent(session.id, "session.error", {
+        error: "checkpoint_failed",
+        message: error instanceof Error ? error.message : "Checkpoint failed",
+      });
+      this.registry.setAgentSessionStatus(session.id, "error", failed.sequence);
+      this.publish(failed);
+      return true;
+    }
   }
 
   private learnSubagent(event: Event): void {
@@ -514,6 +546,58 @@ export class SessionService {
       response,
       this.projectPath(session.projectId),
     );
+  }
+
+  async changes(id: string, commit: string): Promise<SyncDiff> {
+    const { session, checkpoint } = this.checkpointOf(id, commit);
+    return this.requireWorkspace().changes(session.projectId, checkpoint.previousHead, commit);
+  }
+
+  async revert(id: string, commit: string): Promise<RevertResult> {
+    const { session, checkpoint } = this.checkpointOf(id, commit);
+    if (session.status === "running")
+      throw new SessionError("session_busy", "Wait for the agent to finish, or stop it");
+    const result = await this.requireWorkspace().revert(
+      session.projectId,
+      commit,
+      checkpoint.previousHead,
+      session.id,
+    );
+    if (result.status === "ok") {
+      this.publish(
+        this.registry.appendAgentSessionEvent(session.id, "session.checkpoint", {
+          ...result.checkpoint,
+          sessionId: session.id,
+          revertOf: commit,
+        }),
+      );
+    }
+    return result;
+  }
+
+  private requireWorkspace(): SessionWorkspace {
+    if (!this.workspace)
+      throw new SessionError("checkpoints_unavailable", "This runner keeps no checkpoints");
+    return this.workspace;
+  }
+
+  private checkpointOf(
+    id: string,
+    commit: string,
+  ): { session: SessionRecord; checkpoint: { previousHead: string | null } } {
+    const session = this.registry.getAgentSession(id);
+    if (!session) throw new SessionError("session_not_found", "Session is not found");
+    const event = this.registry
+      .listDurableAgentSessionEvents(id)
+      .find((entry) => entry.type === "session.checkpoint" && entry.payload.commit === commit);
+    if (!event || !("previousHead" in event.payload))
+      throw new SessionError("checkpoint_not_found", "This session has no such checkpoint");
+    return {
+      session,
+      checkpoint: {
+        previousHead: stringValue(event.payload.previousHead) ?? null,
+      },
+    };
   }
 
   async interrupt(id: string): Promise<void> {
