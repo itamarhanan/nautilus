@@ -2,8 +2,12 @@ import { describe, expect, it } from "vitest";
 import type { SessionEvent } from "@nautilus/types";
 import {
   buildTranscript,
+  foldEvents,
+  withLive,
+  contextTokens,
   currentActivity,
   latestTodos,
+  latestUsage,
   subagentsOf,
   threadEvents,
 } from "@/lib/transcript";
@@ -357,5 +361,95 @@ describe("checkpoints", () => {
     expect(buildTranscript([event("session.checkpoint", { commit: "d".repeat(40) })])).toEqual([
       expect.objectContaining({ kind: "notice", text: "Checkpoint ddddddd" }),
     ]);
+  });
+});
+
+describe("usage", () => {
+  const reply = (id: string, tokens: Record<string, unknown>, cost: number) =>
+    event("session.message", {
+      message: {
+        id,
+        role: "assistant",
+        modelID: "claude-sonnet-5",
+        tokens,
+        cost,
+      },
+    });
+  const text = (id: string, messageID: string) =>
+    event("session.message", {
+      part: { id, messageID, type: "text", text: "Done" },
+    });
+
+  it("sums a turn over all its steps, hidden ones included, and resets on the next prompt", () => {
+    const tokens = {
+      input: 1000,
+      output: 200,
+      reasoning: 50,
+      cache: { read: 500, write: 0 },
+    };
+    const items = buildTranscript([
+      event("session.message", { message: { role: "user", text: "One" } }),
+      reply("a1", tokens, 0.01),
+      text("t1", "a1"),
+
+      reply("a2", { ...tokens, output: 100 }, 0.02),
+      event("session.message", { message: { role: "user", text: "Two" } }),
+      reply("a3", tokens, 0.005),
+      text("t3", "a3"),
+    ]);
+    const assistants = items.filter((item) => item.kind === "assistant");
+    expect(assistants).toHaveLength(2);
+    expect(assistants[0]?.turnUsage).toMatchObject({
+      output: 300,
+      reasoning: 100,
+      cost: 0.03,
+    });
+    expect(assistants[1]?.turnUsage).toMatchObject({
+      output: 200,
+      cost: 0.005,
+    });
+    expect(latestUsage(items)).toMatchObject({ input: 1000, cacheRead: 500 });
+    const latest = latestUsage(items);
+    expect(latest && contextTokens(latest)).toBe(1750);
+  });
+});
+
+describe("folding once and laying live text over it", () => {
+  const events = [
+    event("session.message", { message: { role: "user", text: "Explain" } }),
+    event("session.message", { message: { id: "a1", role: "assistant" } }),
+    event("session.message", {
+      part: { id: "t1", messageID: "a1", type: "text", text: "Done" },
+    }),
+    event("session.message", { message: { role: "user", text: "More" } }),
+    event("session.message", { message: { id: "a2", role: "assistant" } }),
+
+    event("session.message", {
+      part: { id: "t2", messageID: "a2", type: "text", text: "" },
+    }),
+  ];
+
+  it("keeps rows no token touched, so they do not re-render", () => {
+    const folded = foldEvents(events);
+    const first = withLive(folded, { streaming: { t2: "Str" } });
+    const second = withLive(folded, { streaming: { t2: "Streaming" } });
+    const reply = (items: typeof first, key: string) => items.find((item) => item.key === key);
+    expect(reply(second, "assistant:a1")).toBe(reply(first, "assistant:a1"));
+    expect(reply(second, "assistant:a2")).not.toBe(reply(first, "assistant:a2"));
+    expect(reply(second, "assistant:a2")).toMatchObject({
+      parts: [{ kind: "text", text: "Streaming", isStreaming: true }],
+    });
+  });
+
+  it("hides a reply whose only text has not streamed in yet", () => {
+    const items = withLive(foldEvents(events));
+    expect(items.map((item) => item.key)).not.toContain("assistant:a2");
+    expect(items.at(-1)).toMatchObject({ kind: "user", text: "More" });
+  });
+
+  it("leaves the fold as it was", () => {
+    const folded = foldEvents(events);
+    withLive(folded, { streaming: { t2: "Streaming" } });
+    expect(withLive(folded).map((item) => item.key)).not.toContain("assistant:a2");
   });
 });
