@@ -4,7 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, test } from "vitest";
+import type { SyncRequest } from "@nautilus/types";
+import { loadStateProjects } from "../src/config";
 import { ShadowGit, shadowIndexPath } from "@nautilus/shadow-git";
+import { GrantAuthority } from "../src/grants";
+import { createSyncAgentServer } from "../src/index";
+import { SyncAgent } from "../src/operations";
+
+const allowAll = () => undefined;
 
 const execFileAsync = promisify(execFile);
 
@@ -28,6 +35,50 @@ async function temporaryProject(): Promise<{
   const workTree = join(root, "project");
   await mkdir(workTree);
   return { root, workTree, shadowPath: join(root, "shadow", "demo.git") };
+}
+
+function request(
+  operation: SyncRequest["operation"],
+  values: Partial<SyncRequest> = {},
+): SyncRequest {
+  return {
+    version: 1,
+    requestId: `request-${operation}-${String(Math.random()).slice(2)}`,
+    operation,
+    projectId: "demo",
+    grant: "test-grant-payload.test-grant-signature",
+    issuedAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 300_000).toISOString(),
+    nonce: `nonce-${String(Math.random()).slice(2)}`,
+    baseHead: null,
+    expectedLocalHead: null,
+    expectedRemoteHead: null,
+    payload: {},
+    ...values,
+  };
+}
+
+function agentConfig(project: { root: string; workTree: string; shadowPath: string }) {
+  return {
+    host: "127.0.0.1",
+    port: 4100,
+    home: project.root,
+    transactionPath: join(project.root, "transactions"),
+    backupPath: join(project.root, "backups"),
+    projects: [
+      {
+        id: "demo",
+        name: "Demo",
+        localPath: project.workTree,
+        shadowPath: project.shadowPath,
+      },
+    ],
+    maxFileBytes: 10_000_000,
+    maxTotalBytes: 100_000_000,
+    maxFileCount: 10_000,
+    maxBundleBytes: 100_000_000,
+    requestTimeoutMs: 30_000,
+  };
 }
 
 describe("shadow Git", () => {
@@ -462,5 +513,641 @@ describe("shadow Git", () => {
       binary: true,
       hunks: [],
     });
+  });
+});
+
+describe("sync agent", () => {
+  test("creates, imports, preflights, and applies a clean bundle", async () => {
+    const localProject = await temporaryProject();
+    const remoteProject = await temporaryProject();
+    await writeFile(join(localProject.workTree, "README.md"), "same\n");
+    await writeFile(join(remoteProject.workTree, "README.md"), "same\n");
+    const agent = new SyncAgent(agentConfig(localProject), allowAll);
+    const local = await agent.handle(request("create_bundle"));
+    expect(local.status).toBe("ok");
+    expect(local.bundle).toBeDefined();
+
+    const localState = await agent.handle(
+      request("state", { payload: { runnerBase: local.bundle?.head ?? null } }),
+    );
+    expect(localState.state?.head).toBe(local.bundle?.head);
+    expect(localState.state?.baseHead).toBeTruthy();
+
+    const remoteGit = new ShadowGit({
+      gitDir: remoteProject.shadowPath,
+      workTree: remoteProject.workTree,
+    });
+    const remoteHead = await remoteGit.snapshot("remote checkpoint");
+    const remoteBundle = await remoteGit.createBundle(
+      remoteHead,
+      join(remoteProject.root, "bundles"),
+      null,
+    );
+    const imported = await agent.handle(
+      request("import_bundle", {
+        baseHead: null,
+        payload: {
+          head: remoteBundle.head,
+          sha256: remoteBundle.sha256,
+          bytesBase64: Buffer.from(remoteBundle.bytes).toString("base64"),
+        },
+      }),
+    );
+    expect(imported.status).toBe("ok");
+    const stalePreflight = await agent.handle(
+      request("preflight", {
+        baseHead: null,
+        expectedLocalHead: "f".repeat(40),
+        expectedRemoteHead: remoteHead,
+        payload: { localHead: localState.state?.head, remoteHead },
+      }),
+    );
+    expect(stalePreflight.status).toBe("stale");
+    expect(stalePreflight.error?.code).toBe("stale_local_head");
+    const preflight = await agent.handle(
+      request("preflight", {
+        baseHead: null,
+        expectedLocalHead: localState.state?.head ?? null,
+        expectedRemoteHead: remoteHead,
+        payload: { localHead: "f".repeat(40), remoteHead: "e".repeat(40) },
+      }),
+    );
+    expect(preflight.status).toBe("ok");
+    expect(preflight.applyToken).toBeTruthy();
+    const stale = await agent.handle(
+      request("apply", {
+        baseHead: null,
+        expectedLocalHead: "f".repeat(40),
+        expectedRemoteHead: remoteHead,
+        payload: { applyToken: preflight.applyToken },
+      }),
+    );
+    expect(stale.status).toBe("stale");
+    expect(stale.error?.code).toBe("stale_expected_head");
+    expect(await readFile(join(localProject.workTree, "README.md"), "utf8")).toBe("same\n");
+    const applied = await agent.handle(
+      request("apply", {
+        baseHead: null,
+        expectedLocalHead: localState.state?.head ?? null,
+        expectedRemoteHead: remoteHead,
+        payload: {
+          applyToken: preflight.applyToken,
+          localHead: "f".repeat(40),
+          remoteHead: "e".repeat(40),
+        },
+      }),
+    );
+    expect(applied.status).toBe("ok");
+    expect(await readFile(join(localProject.workTree, "README.md"), "utf8")).toBe("same\n");
+  });
+
+  test("an apply the runner gave up on changes nothing and can be retried", async () => {
+    const localProject = await temporaryProject();
+    const remoteProject = await temporaryProject();
+    await writeFile(join(localProject.workTree, "README.md"), "base\n");
+    const agent = new SyncAgent(agentConfig(localProject), allowAll);
+    const local = await agent.handle(request("create_bundle"));
+    const localState = await agent.handle(
+      request("state", { payload: { runnerBase: local.bundle?.head ?? null } }),
+    );
+
+    const remoteGit = new ShadowGit({
+      gitDir: remoteProject.shadowPath,
+      workTree: remoteProject.workTree,
+    });
+    await remoteGit.initialize();
+    await remoteGit.importBundle(
+      {
+        head: local.bundle?.head ?? "",
+        sha256: local.bundle?.sha256 ?? "",
+        bytes: Buffer.from(local.bundle?.bytesBase64 ?? "", "base64"),
+      },
+      null,
+    );
+    await remoteGit.restoreHead(local.bundle?.head ?? "");
+    await writeFile(join(remoteProject.workTree, "README.md"), "from the runner\n");
+    const remoteHead = await remoteGit.snapshot("runner edit");
+    const bundle = await remoteGit.createBundle(
+      remoteHead,
+      join(remoteProject.root, "bundles"),
+      localState.state?.baseHead ?? null,
+    );
+    const baseHead = localState.state?.baseHead ?? null;
+    await agent.handle(
+      request("import_bundle", {
+        baseHead,
+        payload: {
+          head: bundle.head,
+          sha256: bundle.sha256,
+          bytesBase64: Buffer.from(bundle.bytes).toString("base64"),
+        },
+      }),
+    );
+    const preflight = await agent.handle(
+      request("preflight", {
+        baseHead,
+        expectedLocalHead: localState.state?.head ?? null,
+        expectedRemoteHead: remoteHead,
+      }),
+    );
+    expect(preflight.applyToken).toBeTruthy();
+    const apply = () =>
+      request("apply", {
+        baseHead,
+        expectedLocalHead: localState.state?.head ?? null,
+        expectedRemoteHead: remoteHead,
+        payload: { applyToken: preflight.applyToken },
+      });
+
+    const abandoned = await agent.handle(apply(), undefined, AbortSignal.abort());
+    expect(abandoned.error?.code).toBe("request_timeout");
+    expect(await readFile(join(localProject.workTree, "README.md"), "utf8")).toBe("base\n");
+
+    const applied = await agent.handle(apply());
+    expect(applied.status).toBe("ok");
+    expect(await readFile(join(localProject.workTree, "README.md"), "utf8")).toBe(
+      "from the runner\n",
+    );
+  });
+
+  test("returns a conflict without changing the local file", async () => {
+    const localProject = await temporaryProject();
+    const remoteProject = await temporaryProject();
+    await writeFile(join(localProject.workTree, "README.md"), "local\n");
+    await writeFile(join(remoteProject.workTree, "README.md"), "remote\n");
+    const agent = new SyncAgent(agentConfig(localProject), allowAll);
+    const local = await agent.handle(request("create_bundle"));
+    expect(local.bundle).toBeDefined();
+    const localState = await agent.handle(request("state"));
+    const remoteGit = new ShadowGit({
+      gitDir: remoteProject.shadowPath,
+      workTree: remoteProject.workTree,
+    });
+    const remoteHead = await remoteGit.snapshot("remote checkpoint");
+    const remoteBundle = await remoteGit.createBundle(
+      remoteHead,
+      join(remoteProject.root, "bundles"),
+      null,
+    );
+    await agent.handle(
+      request("import_bundle", {
+        baseHead: null,
+        payload: {
+          head: remoteBundle.head,
+          sha256: remoteBundle.sha256,
+          bytesBase64: Buffer.from(remoteBundle.bytes).toString("base64"),
+        },
+      }),
+    );
+    const preflight = await agent.handle(
+      request("preflight", {
+        baseHead: null,
+        expectedLocalHead: localState.state?.head ?? null,
+        expectedRemoteHead: remoteHead,
+        payload: { localHead: "f".repeat(40), remoteHead: "e".repeat(40) },
+      }),
+    );
+    expect(preflight.status).toBe("conflict");
+    expect(preflight.conflicts).toEqual([
+      {
+        path: "README.md",
+        reason: "add_conflict",
+        pc: "added",
+        runner: "added",
+      },
+    ]);
+    expect(await readFile(join(localProject.workTree, "README.md"), "utf8")).toBe("local\n");
+
+    const resolved = await agent.handle(
+      request("preflight", {
+        baseHead: null,
+        expectedLocalHead: localState.state?.head ?? null,
+        expectedRemoteHead: remoteHead,
+        payload: { resolutions: { "README.md": "runner" } },
+      }),
+    );
+    expect(resolved.status).toBe("ok");
+    const applied = await agent.handle(
+      request("apply", {
+        baseHead: null,
+        expectedLocalHead: localState.state?.head ?? null,
+        expectedRemoteHead: remoteHead,
+        payload: { applyToken: resolved.applyToken },
+      }),
+    );
+    expect(applied.status).toBe("ok");
+    expect(await readFile(join(localProject.workTree, "README.md"), "utf8")).toBe("remote\n");
+  });
+
+  test("accepts only grants minted by this PC for the project and direction", async () => {
+    const project = await temporaryProject();
+    await writeFile(join(project.workTree, "README.md"), "hello\n");
+    let clock = Date.now();
+    const grants = new GrantAuthority(Buffer.alloc(32, 7), () => clock);
+    const agent = new SyncAgent(agentConfig(project), grants.authenticate);
+
+    const pull = grants.mint("demo", "pull");
+    expect((await agent.handle(request("preview", { grant: pull.grant }))).status).toBe("ok");
+
+    const push = grants.mint("demo", "push");
+    const wrongDirection = await agent.handle(request("apply", { grant: push.grant }));
+    expect(wrongDirection.error?.code).toBe("grant_wrong_direction");
+
+    const otherProject = grants.mint("other", "pull");
+    expect((await agent.handle(request("state", { grant: otherProject.grant }))).error?.code).toBe(
+      "grant_wrong_project",
+    );
+
+    const forged = new GrantAuthority(Buffer.alloc(32, 9)).mint("demo", "pull");
+    expect((await agent.handle(request("state", { grant: forged.grant }))).error?.code).toBe(
+      "grant_invalid",
+    );
+
+    grants.revoke(pull.claims.grantId);
+    expect((await agent.handle(request("state", { grant: pull.grant }))).error?.code).toBe(
+      "grant_revoked",
+    );
+
+    const expiring = grants.mint("demo", "pull", 60_000);
+    clock += 61_000;
+    expect((await agent.handle(request("state", { grant: expiring.grant }))).error?.code).toBe(
+      "grant_expired",
+    );
+
+    const long = grants.mint("demo", "pull", 60 * 60 * 1000);
+    expect(Date.parse(long.claims.expiresAt) - Date.parse(long.claims.issuedAt)).toBe(600_000);
+  });
+
+  test("local status counts changes since the base without writing a snapshot", async () => {
+    const project = await temporaryProject();
+    await writeFile(join(project.workTree, "README.md"), "hello\n");
+    const agent = new SyncAgent(agentConfig(project), allowAll);
+    expect(await agent.localStatus("demo")).toMatchObject({
+      neverSynced: true,
+      changedFiles: 0,
+    });
+
+    await agent.handle(request("preview"));
+    const git = new ShadowGit({
+      gitDir: project.shadowPath,
+      workTree: project.workTree,
+    });
+    const headBefore = await git.head();
+
+    expect(await agent.localStatus("demo")).toMatchObject({
+      neverSynced: true,
+    });
+    await agent.handle(request("state", { payload: { runnerBase: headBefore } }));
+    await writeFile(join(project.workTree, "README.md"), "changed\n");
+    await writeFile(join(project.workTree, "new.txt"), "new\n");
+    await writeFile(join(project.workTree, ".env"), "SECRET=1\n");
+
+    const status = await agent.localStatus("demo");
+    expect(status).toMatchObject({ neverSynced: false, changedFiles: 2 });
+    expect(status.changedPaths).toEqual(["README.md", "new.txt"]);
+    expect(await git.head()).toBe(headBefore);
+  });
+
+  test("desktop endpoints require the launch key and reject browser origins", async () => {
+    const project = await temporaryProject();
+    const config = agentConfig(project);
+    const launchKey = "k".repeat(43);
+    const grants = new GrantAuthority(Buffer.from(launchKey, "utf8"));
+    const instance = await createSyncAgentServer(config, grants);
+    await new Promise<void>((resolveListen) => {
+      instance.server.listen(0, "127.0.0.1", () => {
+        resolveListen();
+      });
+    });
+    try {
+      const address = instance.server.address();
+      if (!address || typeof address === "string") throw new Error("test server did not bind");
+      const base = `http://127.0.0.1:${String(address.port)}`;
+      const mint = (headers: Record<string, string>) =>
+        fetch(`${base}/v1/grants`, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...headers },
+          body: JSON.stringify({ projectId: "demo", direction: "pull" }),
+        });
+
+      expect((await mint({})).status).toBe(401);
+      expect((await mint({ authorization: "Bearer wrong" })).status).toBe(401);
+      expect(
+        (
+          await mint({
+            authorization: `Bearer ${launchKey}`,
+            origin: "https://attacker.example",
+          })
+        ).status,
+      ).toBe(401);
+
+      const minted = await mint({ authorization: `Bearer ${launchKey}` });
+      expect(minted.status).toBe(201);
+      const { grant, claims } = (await minted.json()) as {
+        grant: string;
+        claims: { grantId: string };
+      };
+
+      const sync = (value: string) =>
+        fetch(`${base}/v1/sync`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(request("state", { grant: value })),
+        });
+      expect((await sync(grant)).status).toBe(200);
+
+      const revoked = await fetch(`${base}/v1/grants/revoke`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${launchKey}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ grantId: claims.grantId }),
+      });
+      expect(revoked.status).toBe(200);
+      expect((await sync(grant)).status).toBe(400);
+
+      const status = await fetch(`${base}/v1/status?projectId=demo`, {
+        headers: { authorization: `Bearer ${launchKey}` },
+      });
+      expect(status.status).toBe(200);
+      expect(await status.json()).toMatchObject({
+        projectId: "demo",
+        neverSynced: true,
+      });
+      expect(
+        (
+          await fetch(`${base}/v1/status?projectId=missing`, {
+            headers: { authorization: `Bearer ${launchKey}` },
+          })
+        ).status,
+      ).toBe(404);
+    } finally {
+      await instance.close();
+    }
+  });
+
+  test("reads the project list from the desktop state file", async () => {
+    const project = await temporaryProject();
+    const statePath = join(project.root, "state.json");
+    expect(await loadStateProjects(statePath, project.root)).toEqual([]);
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        version: 1,
+        projects: [
+          { id: "shop", name: "Shop", localPath: "~/code/shop" },
+          { id: "../escape", name: "Bad", localPath: "~/bad" },
+          { id: "relative", name: "Relative", localPath: "code/relative" },
+        ],
+        recentFolders: [],
+      }),
+    );
+    expect(await loadStateProjects(statePath, project.root)).toEqual([
+      {
+        id: "shop",
+        name: "Shop",
+        localPath: join(project.root, "code", "shop"),
+        shadowPath: join(project.root, ".nautilus", "shadow", "shop.git"),
+      },
+    ]);
+  });
+
+  test("reads one entry per project, ignoring the removed per-line field", async () => {
+    const project = await temporaryProject();
+    const statePath = join(project.root, "state.json");
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        version: 1,
+        projects: [
+          {
+            id: "shop",
+            name: "Shop",
+            localPath: "~/code/shop",
+            lines: [
+              { id: "default", name: "Shop", localPath: "~/code/shop" },
+              {
+                id: "line-a",
+                name: "Feature",
+                localPath: "~/code/shop-feature",
+              },
+            ],
+          },
+        ],
+        recentFolders: [],
+      }),
+    );
+    const projects = await loadStateProjects(statePath, project.root);
+    expect(projects).toEqual([
+      {
+        id: "shop",
+        name: "Shop",
+        localPath: join(project.root, "code", "shop"),
+        shadowPath: join(project.root, ".nautilus", "shadow", "shop.git"),
+      },
+    ]);
+  });
+
+  test("rejects a bundle whose digest does not match", async () => {
+    const localProject = await temporaryProject();
+    const remoteProject = await temporaryProject();
+    const agent = new SyncAgent(agentConfig(localProject), allowAll);
+    await agent.handle(request("create_bundle"));
+    const state = await agent.handle(request("state"));
+    const remoteGit = new ShadowGit({
+      gitDir: remoteProject.shadowPath,
+      workTree: remoteProject.workTree,
+    });
+    const remoteHead = await remoteGit.snapshot("remote checkpoint");
+    const remoteBundle = await remoteGit.createBundle(
+      remoteHead,
+      join(remoteProject.root, "bundles"),
+      null,
+    );
+    const corrupt = Buffer.from(remoteBundle.bytes);
+    corrupt[0] = (corrupt[0] ?? 0) ^ 1;
+    const result = await agent.handle(
+      request("import_bundle", {
+        baseHead: state.state?.baseHead ?? null,
+        payload: {
+          head: remoteBundle.head,
+          sha256: remoteBundle.sha256,
+          bytesBase64: corrupt.toString("base64"),
+        },
+      }),
+    );
+    expect(result.status).toBe("invalid");
+    expect(result.error?.code).toBe("bundle_digest_mismatch");
+  });
+
+  test("streams bundles over the loopback endpoint and makes apply tokens single-use", async () => {
+    const localProject = await temporaryProject();
+    const remoteProject = await temporaryProject();
+    await writeFile(join(localProject.workTree, "README.md"), "same\n");
+    await writeFile(join(remoteProject.workTree, "README.md"), "same\n");
+    const config = agentConfig(localProject);
+    const instance = await createSyncAgentServer(
+      config,
+      GrantAuthority.random(),
+      new SyncAgent(config, allowAll),
+    );
+    await new Promise<void>((resolveListen) => {
+      instance.server.listen(0, "127.0.0.1", () => {
+        resolveListen();
+      });
+    });
+
+    try {
+      const address = instance.server.address();
+      if (!address || typeof address === "string") throw new Error("test server did not bind");
+      const endpoint = `http://127.0.0.1:${String(address.port)}/v1/sync`;
+      const createResponse = await fetch(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(request("create_bundle")),
+      });
+      expect(createResponse.headers.get("content-type")).toContain("application/octet-stream");
+      const responseHeader = createResponse.headers.get("x-nautilus-response");
+      expect(responseHeader).toBeTruthy();
+      const metadata = JSON.parse(
+        Buffer.from(responseHeader ?? "", "base64url").toString("utf8"),
+      ) as {
+        bundle: { sha256: string };
+      };
+      expect(metadata.bundle.sha256).toHaveLength(64);
+      expect(Buffer.from(await createResponse.arrayBuffer()).length).toBeGreaterThan(0);
+      const stateResponse = await fetch(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(request("state")),
+      });
+      const state = (await stateResponse.json()) as {
+        state: { head: string; baseHead: string };
+      };
+      const remoteGit = new ShadowGit({
+        gitDir: remoteProject.shadowPath,
+        workTree: remoteProject.workTree,
+      });
+      const remoteHead = await remoteGit.snapshot("remote checkpoint");
+      const remoteBundle = await remoteGit.createBundle(
+        remoteHead,
+        join(remoteProject.root, "bundles"),
+        null,
+      );
+      const importRequest = request("import_bundle", {
+        baseHead: null,
+        digest: remoteBundle.sha256,
+        payload: { head: remoteBundle.head, sha256: remoteBundle.sha256 },
+      });
+      const importResponse = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/octet-stream",
+          "x-nautilus-request": Buffer.from(JSON.stringify(importRequest)).toString("base64url"),
+        },
+        body: new Uint8Array(remoteBundle.bytes),
+      });
+      expect(importResponse.status).toBe(200);
+      const preflightResponse = await fetch(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(
+          request("preflight", {
+            baseHead: null,
+            expectedLocalHead: state.state.head,
+            expectedRemoteHead: remoteHead,
+            payload: {},
+          }),
+        ),
+      });
+      const preflight = (await preflightResponse.json()) as {
+        status: string;
+        applyToken: string;
+      };
+      expect(preflight.status).toBe("ok");
+      const applyRequest = request("apply", {
+        baseHead: null,
+        expectedLocalHead: state.state.head,
+        expectedRemoteHead: remoteHead,
+        payload: { applyToken: preflight.applyToken },
+      });
+      const applyResponse = await fetch(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(applyRequest),
+      });
+      expect(applyResponse.status).toBe(200);
+      const retryResponse = await fetch(endpoint, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(
+          request("apply", {
+            baseHead: null,
+            expectedLocalHead: state.state.head,
+            expectedRemoteHead: remoteHead,
+            payload: { applyToken: preflight.applyToken },
+          }),
+        ),
+      });
+      expect(retryResponse.status).toBe(409);
+      const retry = (await retryResponse.json()) as { error: { code: string } };
+      expect(retry.error.code).toBe("expired_apply_token");
+    } finally {
+      await instance.close();
+    }
+  });
+
+  test("restores the synchronization base after an interrupted apply", async () => {
+    const project = await temporaryProject();
+    await writeFile(join(project.workTree, "README.md"), "base\n");
+    const config = agentConfig(project);
+    const agent = new SyncAgent(config, allowAll);
+    const created = await agent.handle(request("create_bundle"));
+    const state = await agent.handle(
+      request("state", {
+        payload: { runnerBase: created.bundle?.head ?? null },
+      }),
+    );
+    const baseHead = state.state?.baseHead;
+    const localHead = state.state?.head;
+    if (!baseHead || !localHead) throw new Error("Expected a synchronized baseline");
+
+    const transactionDirectory = join(project.root, "transactions", "demo", "transactions");
+    const recoveryDirectory = join(project.root, "transactions", "demo", "recovery");
+    await mkdir(transactionDirectory, { recursive: true });
+    await mkdir(recoveryDirectory, { recursive: true });
+    const transactionPath = join(transactionDirectory, "interrupted.json");
+    const recoveryPath = join(recoveryDirectory, "interrupted.json");
+    const basePath = join(project.root, "transactions", "demo", "state", "base.json");
+    await mkdir(join(project.root, "transactions", "demo", "state"), {
+      recursive: true,
+    });
+    await writeFile(basePath, JSON.stringify("wrong-base"));
+    await writeFile(recoveryPath, JSON.stringify({ head: localHead, baseHead }));
+    await writeFile(
+      transactionPath,
+      JSON.stringify({
+        requestId: "interrupted",
+        projectId: "demo",
+        direction: "pull",
+        status: "prepared",
+        baseHead,
+        expectedLocalHead: localHead,
+        expectedRemoteHead: "remote",
+        preflight: "preflight",
+        recoveryPath,
+        previousBaseHead: baseHead,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }),
+    );
+
+    const recoveringAgent = new SyncAgent(config, allowAll);
+    await recoveringAgent.recover();
+    const recovered = await recoveringAgent.handle(request("state"));
+    expect(recovered.state?.baseHead).toBe(baseHead);
+    expect(JSON.parse(await readFile(basePath, "utf8"))).toBe(baseHead);
+    expect(created.status).toBe("ok");
   });
 });
