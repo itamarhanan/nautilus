@@ -1,0 +1,44 @@
+{
+  "name": "nautilus",
+  "version": "0.0.0",
+  "private": true,
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "dev": "turbo run dev --parallel",
+    "dev:local": "./scripts/dev-local.sh",
+    "dev:server": "pnpm --filter @nautilus/server dev",
+    "dev:web": "pnpm --filter @nautilus/web dev",
+    "build": "turbo run build",
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check .",
+    "lint": "eslint .",
+    "knip": "knip",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit -p tsconfig.json && turbo run typecheck"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@next/eslint-plugin-next": "16.3.6",
+    "@types/node": "24.19.0",
+    "eslint": "10.11.0",
+    "globals": "17.12.0",
+    "jiti": "2.7.0",
+    "knip": "6.38.0",
+    "oxfmt": "0.70.0",
+    "turbo": "2.11.4",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.70.1",
+    "vitest": "5.0.2"
+  },
+  "engines": {
+    "node": ">=24.15.0"
+  },
+  "packageManager": "pnpm@10.28.1",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "opencode-ai"
+    ]
+  }
+}
