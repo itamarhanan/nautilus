@@ -275,3 +275,54 @@ export function foldEvents(events: readonly SessionEvent[]): readonly Transcript
   assignTurnUsage(state.items);
   return state.items;
 }
+
+const isTextPart = (
+  part: AssistantPart,
+): part is Extract<AssistantPart, { kind: "text" | "reasoning" }> =>
+  part.kind === "text" || part.kind === "reasoning";
+
+export function withLive(
+  folded: readonly TranscriptItem[],
+  live: TranscriptLive = {},
+): TranscriptItem[] {
+  const streaming = live.streaming ?? {};
+  const visible: TranscriptItem[] = [];
+  for (const item of folded) {
+    if (item.kind !== "assistant") {
+      visible.push(item);
+      continue;
+    }
+    const touched = item.parts.some(
+      (part) => isTextPart(part) && (part.text === "" || part.id in streaming),
+    );
+    const shown = touched
+      ? {
+          ...item,
+          parts: item.parts.flatMap((part): AssistantPart[] => {
+            if (!isTextPart(part)) return [part];
+            const isStreaming = part.id in streaming;
+            const partText = part.text + (isStreaming ? (streaming[part.id] ?? "") : "");
+            return partText ? [{ ...part, text: partText, isStreaming }] : [];
+          }),
+        }
+      : item;
+    if (shown.parts.length > 0 || shown.error !== null) visible.push(shown);
+  }
+  if (live.outgoing) {
+    visible.push({
+      kind: "user",
+      key: "user:outgoing",
+      text: live.outgoing.text,
+      timestamp: live.outgoing.timestamp,
+      isPending: true,
+    });
+  }
+  return visible;
+}
+
+export function buildTranscript(
+  events: readonly SessionEvent[],
+  live: TranscriptLive = {},
+): TranscriptItem[] {
+  return withLive(foldEvents(events), live);
+}
