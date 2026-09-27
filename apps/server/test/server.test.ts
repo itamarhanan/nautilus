@@ -12,8 +12,13 @@ import { Logger } from "../src/logger";
 import { Registry } from "../src/registry";
 import { loadOrCreateSecret } from "../src/secrets";
 import { ShadowGit } from "@nautilus/shadow-git";
-import { SyncCoordinator as RunnerSyncCoordinator, TunnelSyncClient } from "../src/sync";
-import { listen, pairDevice, request, testSecret } from "./helpers";
+import {
+  SyncCoordinator as RunnerSyncCoordinator,
+  SyncCoordinatorError,
+  TunnelSyncClient,
+  type SyncCoordinator,
+} from "../src/sync";
+import { listen, pairDevice, request, testSecret, type Ports } from "./helpers";
 
 function project(overrides: Partial<ProjectConfig> = {}): ProjectConfig {
   return {
@@ -833,5 +838,260 @@ test("a pnpm project is installed before its dev command runs when its lockfile 
     await app.close();
     await rm(root, { recursive: true, force: true });
     await rm(bin, { recursive: true, force: true });
+  }
+});
+
+test("control sync routes forward a matching grant and reject mismatched ones", async () => {
+  const received: Array<{ direction: string; grant: string }> = [];
+  const ok = (requestId: string) => ({ version: 1, requestId, status: "ok" });
+  const fakeSync = {
+    connect: () => undefined,
+    recoverAll: () => Promise.resolve(),
+    validateAll: () => Promise.resolve(new Map()),
+    pendingCheckpoints: () => Promise.resolve([]),
+    addProject: () => undefined,
+    hasCode: () => Promise.resolve(true),
+    preview: (_projectId: string, direction: string, grant: string) => {
+      received.push({ direction, grant });
+      return Promise.resolve(ok("preview-request"));
+    },
+    pull: (_projectId: string, grant: string) => {
+      received.push({ direction: "pull", grant });
+      return Promise.resolve(ok("pull-request"));
+    },
+    push: () => Promise.resolve(ok("push-request")),
+  } as unknown as SyncCoordinator;
+  const app = await createNautilusApp({
+    registryPath: ":memory:",
+    authSecret: testSecret,
+    projects: [project()],
+    sync: fakeSync,
+    logger: new Logger(() => undefined),
+  });
+  const ports = await listen(app);
+  const grantFor = (claims: Record<string, unknown>) =>
+    `${Buffer.from(JSON.stringify(claims)).toString("base64url")}.signature`;
+  const valid = grantFor({
+    version: 1,
+    grantId: "g1",
+    projectId: "demo",
+    direction: "pull",
+    issuedAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  });
+  try {
+    const missing = await request(ports, "POST", "/api/projects/demo/sync-requests", {
+      control: true,
+      body: { direction: "pull" },
+    });
+    expect(missing.status).toBe(400);
+    expect(missing.body.error).toBe("invalid_grant");
+
+    for (const claims of [
+      { projectId: "other", direction: "pull" },
+      { projectId: "demo", direction: "push" },
+      {
+        projectId: "demo",
+        direction: "pull",
+        expiresAt: new Date(Date.now() - 1000).toISOString(),
+      },
+    ]) {
+      const mismatched = grantFor({
+        version: 1,
+        grantId: "g2",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        ...claims,
+      });
+      const response = await request(ports, "POST", "/api/projects/demo/sync-requests", {
+        control: true,
+        body: { direction: "pull", grant: mismatched },
+      });
+      expect(response.status, JSON.stringify(claims)).toBe(400);
+    }
+    expect(received).toEqual([]);
+
+    for (const path of [
+      "/api/projects/demo/sync-requests/preview",
+      "/api/projects/demo/sync-requests",
+    ]) {
+      const response = await request(ports, "POST", path, {
+        control: true,
+        body: { direction: "pull", grant: valid },
+      });
+      expect(response.status, path).toBe(200);
+    }
+    expect(received).toEqual([
+      { direction: "pull", grant: valid },
+      { direction: "pull", grant: valid },
+    ]);
+  } finally {
+    await app.close();
+  }
+});
+
+test("sync read routes report an unconfigured project as a refusal, not an internal error", async () => {
+  const refusing = (code: string) => () =>
+    Promise.reject(new SyncCoordinatorError("invalid", code, "Project is not configured"));
+  const fakeSync = {
+    connect: () => undefined,
+    recoverAll: () => Promise.resolve(),
+    validateAll: () => Promise.resolve(new Map()),
+    pendingCheckpoints: () => Promise.resolve([]),
+    addProject: () => undefined,
+    hasCode: () => Promise.resolve(true),
+    status: refusing("project_not_configured"),
+    history: refusing("project_not_configured"),
+  } as unknown as SyncCoordinator;
+  const app = await createNautilusApp({
+    registryPath: ":memory:",
+    authSecret: testSecret,
+    projects: [project()],
+    sync: fakeSync,
+    logger: new Logger(() => undefined),
+  });
+  const ports = await listen(app);
+  try {
+    for (const path of ["/api/projects/demo/sync-status", "/api/projects/demo/sync-history"]) {
+      const response = await request(ports, "GET", path, { control: true });
+      expect(response.status, path).toBe(400);
+      expect(response.body.error, path).toBe("project_not_configured");
+    }
+  } finally {
+    await app.close();
+  }
+});
+
+test("a project with no code is refused before the dev server is spawned", async () => {
+  const root = await mkdtemp(join(tmpdir(), "nautilus-not-synced-"));
+  const remotePath = join(root, "remote");
+  const fakeSync = {
+    connect: () => undefined,
+    recoverAll: () => Promise.resolve(),
+    validateAll: () => Promise.resolve(new Map()),
+    pendingCheckpoints: () => Promise.resolve([]),
+    addProject: () => undefined,
+
+    hasCode: () => Promise.resolve(false),
+  } as unknown as SyncCoordinator;
+  const app = await createNautilusApp({
+    registryPath: ":memory:",
+    authSecret: testSecret,
+    projects: [project({ remotePath })],
+    sync: fakeSync,
+    logger: new Logger(() => undefined),
+  });
+  const ports = await listen(app);
+  try {
+    const response = await request(ports, "POST", "/api/projects/demo/start", {
+      control: true,
+    });
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe("project_not_synced");
+
+    const listed = await request(ports, "GET", "/api/projects", {
+      control: true,
+    });
+    const [record] = listed.body.projects as ProjectRecord[];
+    if (!record) throw new Error("the project was not listed");
+    expect(record.state).toBe("inactive");
+    expect(record.lastError).toBeNull();
+    expect(record.firstSyncAt).toBeNull();
+  } finally {
+    await app.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("first sync is recorded once and survives a restart", async () => {
+  const root = await mkdtemp(join(tmpdir(), "nautilus-first-sync-"));
+  const registryPath = join(root, "registry.db");
+  const remotePath = join(root, "remote");
+  await mkdir(remotePath, { recursive: true });
+  let syncs = 0;
+  let onFirstSync: ((projectId: string) => void | Promise<void>) | undefined;
+  const fakeSync = {
+    connect: (hooks: { onFirstSync?: (projectId: string) => void | Promise<void> }) => {
+      onFirstSync = hooks.onFirstSync;
+    },
+    recoverAll: () => Promise.resolve(),
+    validateAll: () => Promise.resolve(new Map()),
+    pendingCheckpoints: () => Promise.resolve([]),
+    addProject: () => undefined,
+    hasCode: () => Promise.resolve(true),
+    push: async (projectId: string) => {
+      syncs += 1;
+      await onFirstSync?.(projectId);
+      return { version: 1, requestId: `r${String(syncs)}`, status: "ok" };
+    },
+  } as unknown as SyncCoordinator;
+  const build = () =>
+    createNautilusApp({
+      registryPath,
+      authSecret: testSecret,
+      projects: [project({ remotePath })],
+      sync: fakeSync,
+      logger: new Logger(() => undefined),
+    });
+  const firstSyncAtOf = async (ports: Ports) => {
+    const listed = await request(ports, "GET", "/api/projects", {
+      control: true,
+    });
+    return (listed.body.projects as ProjectRecord[]).at(0)?.firstSyncAt ?? null;
+  };
+  const grant = `${Buffer.from(
+    JSON.stringify({
+      version: 1,
+      grantId: "g1",
+      projectId: "demo",
+      direction: "push",
+      issuedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    }),
+  ).toString("base64url")}.signature`;
+
+  let app = await build();
+  try {
+    const ports = await listen(app);
+    expect(await firstSyncAtOf(ports)).toBeNull();
+
+    const pushed = await request(ports, "POST", "/api/projects/demo/sync-requests", {
+      control: true,
+      body: { direction: "push", grant },
+    });
+    expect(pushed.status).toBe(200);
+    const recorded = await firstSyncAtOf(ports);
+    expect(recorded).not.toBeNull();
+    await app.close();
+
+    app = await build();
+    const restarted = await listen(app);
+    expect(await firstSyncAtOf(restarted)).toBe(recorded);
+  } finally {
+    await app.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("adding a project the runner already knows still creates its directory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "nautilus-known-project-"));
+  const remotePath = join(root, "projects", "demo");
+  const app = await createNautilusApp({
+    registryPath: ":memory:",
+    authSecret: testSecret,
+    projects: [project({ remotePath })],
+    logger: new Logger(() => undefined),
+  });
+  const ports = await listen(app);
+  try {
+    expect(existsSync(remotePath)).toBe(false);
+    const response = await request(ports, "POST", "/api/projects", {
+      control: true,
+      body: { projectId: "demo", name: "Demo" },
+    });
+    expect(response.status).toBe(201);
+    expect((await stat(remotePath)).isDirectory()).toBe(true);
+  } finally {
+    await app.close();
+    await rm(root, { recursive: true, force: true });
   }
 });
