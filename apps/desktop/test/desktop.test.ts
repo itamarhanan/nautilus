@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
+import { AgentApi, ApiError, ControlApi } from "../src/lib/api";
 import { ControlChannel } from "../src/lib/control";
 import { friendlyError } from "../src/lib/errors";
 import {
@@ -486,6 +487,54 @@ describe("control channel", () => {
       /could not be resolved/,
     );
     expect(channel.current.phase).toBe("offline");
+  });
+});
+
+describe("control API", () => {
+  it("keeps structured conflict responses", async () => {
+    const conflict = {
+      version: 1,
+      requestId: "request-1",
+      status: "conflict",
+      conflicts: [{ path: "src/app.ts", reason: "content_conflict" }],
+    };
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(conflict, 409)));
+    const api = new ControlApi("http://127.0.0.1:47001");
+    const error = await api
+      .sync("demo", "push", { grant: "g.s" })
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).syncResponse).toEqual(conflict);
+    expect((error as ApiError).conflicts).toEqual(conflict.conflicts);
+  });
+
+  it("sends the grant and never a bearer token", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse({ version: 1, requestId: "r", status: "ok" }));
+    vi.stubGlobal("fetch", fetchMock);
+    await new ControlApi("http://127.0.0.1:47001").sync("demo", "pull", {
+      grant: "payload.sig",
+      requestId: "req-12345678",
+    });
+    const [url, init] = firstCall(fetchMock);
+    expect(url).toBe("http://127.0.0.1:47001/api/projects/demo/sync-requests");
+    expect(JSON.parse(typeof init?.body === "string" ? init.body : "{}")).toEqual({
+      direction: "pull",
+      grant: "payload.sig",
+      requestId: "req-12345678",
+    });
+    expect(new Headers(init?.headers).get("authorization")).toBeNull();
+  });
+
+  it("authenticates agent calls with the launch key", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse({ grant: "a.b", claims: { grantId: "g" } }, 201));
+    vi.stubGlobal("fetch", fetchMock);
+    await new AgentApi("http://127.0.0.1:4100", "launch-key").mintGrant("demo", "push");
+    const [, init] = firstCall(fetchMock);
+    expect(new Headers(init?.headers).get("authorization")).toBe("Bearer launch-key");
   });
 });
 
