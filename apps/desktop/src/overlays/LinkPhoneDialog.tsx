@@ -81,7 +81,7 @@ export function LinkPhoneDialog() {
         header={
           <DialogHeader
             title="Link a phone"
-            subtitle="Scan with the phone's camera, then confirm on the phone."
+            subtitle="Scan with the phone's camera to link it."
             onOpenChange={setOpen}
           />
         }
