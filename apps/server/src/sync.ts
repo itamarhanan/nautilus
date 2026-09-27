@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { rm } from "node:fs/promises";
+import { readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   ProjectConfig,
@@ -23,6 +23,7 @@ import {
   withLock,
   writeJson,
   type ShadowGitLimits,
+  type ShadowGitValidation,
 } from "@nautilus/shadow-git";
 
 type JsonRecord = Record<string, unknown>;
@@ -824,6 +825,58 @@ export class SyncCoordinator {
   async history(projectId: string): Promise<SyncEvent[]> {
     this.project(projectId);
     return readJson<SyncEvent[]>(this.eventsPath(projectId), []);
+  }
+
+  async recover(projectId: string): Promise<void> {
+    const project = this.project(projectId);
+    const git = await this.git(project);
+    const directory = this.stateDir(projectId, "transactions");
+    for (const entry of await readdir(directory).catch(() => [])) {
+      if (!entry.endsWith(".json")) continue;
+      const path = join(directory, entry);
+      const transaction = await readJson<SyncTransaction | undefined>(path, undefined);
+      if (!transaction || (transaction.status !== "prepared" && transaction.status !== "applied")) {
+        continue;
+      }
+      if (transaction.recoveryPath) {
+        const recovery = await readJson<{ head: string; baseHead?: string | null } | undefined>(
+          transaction.recoveryPath,
+          undefined,
+        );
+        if (recovery?.head) await git.restoreHead(recovery.head);
+        if (transaction.previousBaseHead === null) {
+          await rm(this.basePath(projectId), { force: true });
+        } else if (transaction.previousBaseHead) {
+          await this.setBase(projectId, transaction.previousBaseHead);
+        }
+      }
+      transaction.status = "rolled_back";
+      transaction.updatedAt = new Date().toISOString();
+      await writeJson(path, transaction);
+    }
+  }
+
+  async validateAll(): Promise<Map<string, ShadowGitValidation>> {
+    const results = new Map<string, ShadowGitValidation>();
+    await Promise.all(
+      [...this.projects.values()].map(async (project) => {
+        results.set(project.id, await (await this.git(project)).validate());
+      }),
+    );
+    return results;
+  }
+
+  async pendingCheckpoints(): Promise<string[]> {
+    const pending: string[] = [];
+    for (const projectId of this.projects.keys()) {
+      const path = this.pendingCheckpointPath(projectId);
+      if (await readJson<unknown>(path, null)) pending.push(projectId);
+    }
+    return pending;
+  }
+
+  async recoverAll(): Promise<void> {
+    await Promise.all([...this.projects.keys()].map((projectId) => this.recover(projectId)));
   }
 
   private async pruneHistory(projectId: string): Promise<void> {
