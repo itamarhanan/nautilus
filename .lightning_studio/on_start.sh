@@ -93,8 +93,19 @@ if [[ ! -f "${env_file}" && -f "${SECRET_DIR}/runner.env" ]]; then
 fi
 # The env file is optional: it holds model-provider keys and overrides. The
 # server creates its own auth secret in ${SECRET_DIR}/auth-secret on first boot.
+for secret_file in "${SECRET_DIR}"/*; do
+  if [[ -f "${secret_file}" && -O "${secret_file}" ]]; then
+    chmod 600 "${secret_file}"
+  fi
+done
 if [[ -f "${env_file}" ]]; then
   [[ -r "${env_file}" ]] || fail "${env_file} is not readable"
+  # A Studio's home filesystem does not keep file modes across a restart:
+  # files come back 0744 however they were left. Every boot tightens them
+  # again, and the check below still refuses a file owned by someone else or
+  # a filesystem that ignores the change.
+  [[ -O "${env_file}" ]] || fail "${env_file} is not owned by $(id -un)"
+  chmod 600 "${env_file}"
   env_file_mode="$(stat -c '%a' "${env_file}")"
   (( (8#${env_file_mode} & 077) == 0 )) || fail "${env_file} must not be accessible by group or other users"
   set -a
