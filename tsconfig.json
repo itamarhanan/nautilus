@@ -1,0 +1,9 @@
+{
+  "//": "Covers the repository's own tooling files. Deliberately does not include apps/ or packages/: each of those owns its tsconfig.",
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023"],
+    "noEmit": true
+  },
+  "include": ["eslint.config.ts", "vitest.config.ts"]
+}
