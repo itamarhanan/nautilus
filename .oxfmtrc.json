@@ -1,0 +1,11 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "ignorePatterns": [
+    "**/node_modules/**",
+    "**/.next*/**",
+    "**/.turbo/**",
+    "**/dist/**",
+    "**/target/**",
+    "**/src-tauri/gen/**"
+  ]
+}
