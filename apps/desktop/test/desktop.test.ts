@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
+import { brand } from "@nautilus/brand";
 import type { SyncFileChange, SyncResponse } from "@nautilus/types";
 import { diffDisplay } from "../src/lib/diff";
 import { AgentProcess, agentExitMessage, createLaunchKey } from "../src/lib/agent";
@@ -1326,6 +1327,26 @@ describe("diff display", () => {
     });
     expect(diffDisplay(file(0, 0, { status: "renamed" }))).toEqual({
       kind: "empty",
+    });
+  });
+});
+
+describe("bundle metadata", () => {
+  it("matches the brand package", () => {
+    const config = JSON.parse(
+      readFileSync(fileURLToPath(new URL("../src-tauri/tauri.conf.json", import.meta.url)), "utf8"),
+    ) as {
+      productName: string;
+      app: { windows: { title: string }[] };
+      bundle: Record<string, unknown>;
+    };
+    expect(config.productName).toBe(brand.name);
+    expect(config.app.windows[0]?.title).toBe(brand.name);
+    expect(config.bundle).toMatchObject({
+      publisher: brand.publisher,
+      copyright: brand.copyright,
+      shortDescription: brand.tagline,
+      longDescription: brand.description,
     });
   });
 });
