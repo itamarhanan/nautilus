@@ -274,3 +274,194 @@ describe("the open session", () => {
     expect(store.getState().session?.isSnapshotLoaded).toBe(false);
   });
 });
+
+describe("actions", () => {
+  test("a prompt can be sent while a start request is in flight", async () => {
+    const start = deferred<Response>();
+    const { store, calls } = await openStore([session("s1")], {
+      "POST /api/projects/p1/start": () => start.promise,
+      "POST /api/sessions/s1/prompt": () => json(202, {}),
+    });
+    const { actions } = store.getState();
+    actions.applySnapshot({ session: session("s1"), events: [] });
+    const starting = actions.changeProjectState("start");
+    expect(store.getState().pending.projectControl).toBe("start");
+
+    expect(await actions.sendPrompt("Add a button")).toBe(true);
+    expect(calls).toContain("POST /api/sessions/s1/prompt");
+    expect(store.getState().session?.awaitingEvent).toBe(true);
+
+    start.resolve(json(200, { project: { ...project("p1"), state: "starting" } }));
+    await starting;
+    expect(store.getState().pending.projectControl).toBeNull();
+    expect(store.getState().projects[0]?.state).toBe("starting");
+  });
+
+  test("a second prompt waits for the first request", async () => {
+    const first = deferred<Response>();
+    const { store } = await openStore([session("s1")], {
+      "POST /api/sessions/s1/prompt": () => first.promise,
+    });
+    const { actions } = store.getState();
+    actions.applySnapshot({ session: session("s1"), events: [] });
+    const sending = actions.sendPrompt("one");
+    expect(await actions.sendPrompt("two")).toBe(false);
+    first.resolve(json(202, {}));
+    expect(await sending).toBe(true);
+  });
+
+  test("a sent prompt shows at once and gives way to the runner's copy", async () => {
+    const { store } = await openStore([session("s1")], {
+      "POST /api/sessions/s1/prompt": () => json(202, {}),
+    });
+    const { actions } = store.getState();
+    actions.applySnapshot({ session: session("s1"), events: [] });
+    const sending = actions.sendPrompt("  Add a button ");
+    expect(store.getState().session?.outgoing?.text).toBe("Add a button");
+    expect(await sending).toBe(true);
+
+    actions.applyEvent({
+      ...event(1, "session.message"),
+      payload: { message: { role: "user", text: "Add a button" } },
+    });
+    expect(store.getState().session?.outgoing).toBeNull();
+    expect(openSessionRecord(store.getState())?.status).toBe("running");
+  });
+
+  test("a permission request can be answered, and an undo conflict is explained", async () => {
+    const { store, calls } = await openStore([session("s1")], {
+      "POST /api/sessions/s1/permissions/per-1": () => json(200, { accepted: true }),
+      "POST /api/sessions/s1/revert": () =>
+        json(409, { status: "conflict", conflicts: ["src/App.tsx"] }),
+    });
+    const { actions } = store.getState();
+    actions.applySnapshot({ session: session("s1"), events: [] });
+
+    await actions.respondToPermission("per-1", "always");
+    expect(calls).toContain("POST /api/sessions/s1/permissions/per-1");
+    expect(store.getState().pending.permission).toBeNull();
+
+    await actions.revertCheckpoint("c".repeat(40));
+    expect(store.getState().error).toContain("src/App.tsx");
+    expect(store.getState().pending.revert).toBeNull();
+  });
+
+  test("an undo refused for another reason shows the runner's message", async () => {
+    const { store } = await openStore([session("s1")], {
+      "POST /api/sessions/s1/revert": () =>
+        json(409, {
+          error: "agent_running",
+          message: "An agent is still editing the runner",
+        }),
+    });
+    const { actions } = store.getState();
+    actions.applySnapshot({ session: session("s1"), events: [] });
+    await actions.revertCheckpoint("c".repeat(40));
+    expect(store.getState().error).toBe("An agent is still editing the runner");
+  });
+
+  test("a delta streams into the open session without joining its log", async () => {
+    const { store } = await openStore([session("s1")]);
+    const { actions } = store.getState();
+    actions.applySnapshot({ session: session("s1"), events: [] });
+    actions.applyEvent({
+      ...event(0, "session.delta"),
+      durable: false,
+      payload: { partId: "t1", field: "text", delta: "Hi" },
+    });
+    expect(store.getState().session).toMatchObject({
+      events: [],
+      streaming: { t1: "Hi" },
+    });
+  });
+
+  test("a prompt carries the picked model, and a remembered model the runner lacks is dropped", async () => {
+    const saved = new Map([
+      ["nautilus:model", JSON.stringify({ providerId: "old", modelId: "gone" })],
+    ]);
+    const sonnet = { providerId: "anthropic", modelId: "claude-sonnet-5" };
+    const bodies: unknown[] = [];
+    const { store } = await openStore([session("s1")], {
+      "GET /api/models": () =>
+        json(200, {
+          models: [
+            {
+              ...sonnet,
+              name: "Claude Sonnet 5",
+              providerName: "Anthropic",
+              isReasoning: true,
+              contextLimit: 1_000_000,
+            },
+          ],
+          default: null,
+        }),
+      "POST /api/sessions/s1/prompt": (init) => {
+        bodies.push(JSON.parse(init?.body as string));
+        return json(202, {});
+      },
+    });
+
+    vi.stubGlobal("window", {
+      localStorage: {
+        getItem: (key: string) => saved.get(key) ?? null,
+        setItem: (key: string, value: string) => saved.set(key, value),
+        removeItem: (key: string) => saved.delete(key),
+      },
+    });
+    const { actions } = store.getState();
+    await actions.loadModels();
+    expect(store.getState().models.status).toBe("ready");
+    expect(store.getState().model).toBeNull();
+
+    actions.setModel(sonnet);
+    expect(JSON.parse(saved.get("nautilus:model") ?? "null")).toEqual(sonnet);
+    actions.applySnapshot({ session: session("s1"), events: [] });
+    expect(await actions.sendPrompt("Add a button")).toBe(true);
+    expect(bodies).toEqual([{ prompt: "Add a button", model: sonnet }]);
+  });
+
+  test("stop interrupts a running turn", async () => {
+    const { store, calls } = await openStore([session("s1", { status: "running" })], {
+      "POST /api/sessions/s1/interrupt": () => json(200, {}),
+    });
+    const { actions } = store.getState();
+    actions.applySnapshot({
+      session: session("s1", { status: "running" }),
+      events: [],
+    });
+    await actions.interruptSession();
+    expect(calls).toContain("POST /api/sessions/s1/interrupt");
+    expect(store.getState().pending.interrupt).toBe(false);
+  });
+
+  test("a failed prompt reports the runner's message and returns false", async () => {
+    const { store } = await openStore([session("s1")], {
+      "POST /api/sessions/s1/prompt": () => json(409, { message: "Session is busy" }),
+    });
+    const { actions } = store.getState();
+    actions.applySnapshot({ session: session("s1"), events: [] });
+    expect(await actions.sendPrompt("hello")).toBe(false);
+    expect(store.getState().error).toBe("Session is busy");
+    expect(store.getState().session?.outgoing).toBeNull();
+    expect(store.getState().pending.turn).toBeNull();
+  });
+
+  test("a 401 from an action signs the device out", async () => {
+    const { store } = await openStore([session("s1")], {
+      "POST /api/projects/p1/stop": () => json(401, { error: "unauthorized" }),
+    });
+    await store.getState().actions.changeProjectState("stop");
+    expect(store.getState().auth).toBe("unauthenticated");
+    expect(store.getState().project).toBeNull();
+  });
+
+  test("a new session opens at once", async () => {
+    const { store } = await openStore([session("s1")], {
+      "POST /api/sessions": () => json(201, { session: session("s2") }),
+    });
+    await store.getState().actions.createSession();
+    const state = store.getState();
+    expect(state.project?.sessions.map((one) => one.id)).toEqual(["s2", "s1"]);
+    expect(state.session).toMatchObject({ id: "s2", isSnapshotLoaded: true });
+  });
+});
