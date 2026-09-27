@@ -281,3 +281,81 @@ describe("subagents and todos", () => {
     ]);
   });
 });
+
+describe("permission requests", () => {
+  const asked = (id: string, subagent?: string) =>
+    event("session.permission", {
+      id,
+      permission: "bash",
+      patterns: ["git push"],
+      title: "bash: git push",
+      ...(subagent ? { subagent } : {}),
+    });
+
+  it("shows an open request until OpenCode's reply answers it in place", () => {
+    const open = buildTranscript([asked("per-1")]);
+    expect(open).toEqual([
+      expect.objectContaining({
+        kind: "permission",
+        id: "per-1",
+        permission: "bash",
+        patterns: ["git push"],
+        response: null,
+      }),
+    ]);
+    expect(currentActivity(open)).toBe("Waiting for your approval");
+
+    const answered = buildTranscript([
+      asked("per-1"),
+      event("session.permission", { id: "per-1", response: "always" }),
+    ]);
+    expect(answered).toHaveLength(1);
+    expect(answered[0]).toMatchObject({
+      kind: "permission",
+      response: "always",
+    });
+    expect(currentActivity(answered)).not.toBe("Waiting for your approval");
+  });
+
+  it("ignores a reply with no request before it", () => {
+    expect(
+      buildTranscript([event("session.permission", { id: "per-9", response: "once" })]),
+    ).toEqual([]);
+  });
+
+  it("puts a subagent's request in the main thread, where it can be answered", () => {
+    const events = [asked("per-2", "child-session")];
+    expect(threadEvents(events, null)).toHaveLength(1);
+    expect(threadEvents(events, "child-session")).toHaveLength(1);
+  });
+});
+
+describe("checkpoints", () => {
+  it("turns a checkpoint with a starting point into a reviewable item", () => {
+    const items = buildTranscript([
+      event("session.checkpoint", {
+        commit: "b".repeat(40),
+        previousHead: "a".repeat(40),
+      }),
+      event("session.checkpoint", {
+        commit: "c".repeat(40),
+        previousHead: "b".repeat(40),
+        revertOf: "b".repeat(40),
+      }),
+    ]);
+    expect(items).toEqual([
+      expect.objectContaining({
+        kind: "checkpoint",
+        commit: "b".repeat(40),
+        revertOf: null,
+      }),
+      expect.objectContaining({ kind: "checkpoint", revertOf: "b".repeat(40) }),
+    ]);
+  });
+
+  it("keeps a checkpoint without a starting point as a plain notice", () => {
+    expect(buildTranscript([event("session.checkpoint", { commit: "d".repeat(40) })])).toEqual([
+      expect.objectContaining({ kind: "notice", text: "Checkpoint ddddddd" }),
+    ]);
+  });
+});
