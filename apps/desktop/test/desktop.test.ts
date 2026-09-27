@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import type { SyncResponse } from "@nautilus/types";
+import type { SyncFileChange, SyncResponse } from "@nautilus/types";
+import { diffDisplay } from "../src/lib/diff";
 import { AgentProcess, agentExitMessage, createLaunchKey } from "../src/lib/agent";
 import { AgentApi, ApiError, ControlApi } from "../src/lib/api";
 import { ControlChannel } from "../src/lib/control";
@@ -703,6 +704,70 @@ describe("sync session", () => {
     await expect(broken.preview()).rejects.toThrow("boom");
     await broken.close();
     expect(failingMocks.revokeGrant).toHaveBeenCalledWith("grant-1");
+  });
+});
+
+describe("diff display", () => {
+  const file = (
+    additions: number,
+    lines: number,
+    extra: Partial<SyncFileChange> = {},
+  ): SyncFileChange => ({
+    path: "src/a.ts",
+    status: "added",
+    binary: false,
+    additions,
+    deletions: 0,
+    hunks:
+      lines === 0
+        ? []
+        : [
+            {
+              oldStart: 0,
+              oldLines: 0,
+              newStart: 1,
+              newLines: lines,
+              lines: Array.from({ length: lines }, (_, index) => ({
+                type: "addition" as const,
+                oldLine: null,
+                newLine: index + 1,
+                content: "x",
+              })),
+            },
+          ],
+    ...extra,
+  });
+
+  it("shows a complete small diff and holds back a large one, counted from the file", () => {
+    expect(diffDisplay(file(104, 104))).toEqual({ kind: "shown" });
+    expect(diffDisplay(file(900, 900))).toEqual({
+      kind: "large",
+      changed: 900,
+    });
+  });
+
+  it("never shows a diff that arrived cut short or empty as if it were complete", () => {
+    expect(diffDisplay(file(6458, 2676))).toEqual({
+      kind: "omitted",
+      reason: "limit",
+    });
+    expect(diffDisplay(file(6458, 0))).toEqual({
+      kind: "omitted",
+      reason: "limit",
+    });
+    expect(diffDisplay(file(6458, 0, { omitted: "large" }))).toEqual({
+      kind: "omitted",
+      reason: "large",
+    });
+  });
+
+  it("has something to say for binary files and files with no line changes", () => {
+    expect(diffDisplay(file(0, 0, { binary: true }))).toEqual({
+      kind: "binary",
+    });
+    expect(diffDisplay(file(0, 0, { status: "renamed" }))).toEqual({
+      kind: "empty",
+    });
   });
 });
 
