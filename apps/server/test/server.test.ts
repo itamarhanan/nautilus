@@ -1,5 +1,7 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "vitest";
@@ -7,7 +9,10 @@ import type { ProjectConfig, ProjectRecord } from "@nautilus/types";
 import { parseProjectConfig, parseProjects } from "../src/config";
 import { createNautilusApp } from "../src/index";
 import { Logger } from "../src/logger";
+import { Registry } from "../src/registry";
 import { loadOrCreateSecret } from "../src/secrets";
+import { ShadowGit } from "@nautilus/shadow-git";
+import { SyncCoordinator as RunnerSyncCoordinator, TunnelSyncClient } from "../src/sync";
 import { listen, pairDevice, request, testSecret } from "./helpers";
 
 function project(overrides: Partial<ProjectConfig> = {}): ProjectConfig {
@@ -347,5 +352,486 @@ test("the runner creates its auth secret once and keeps it private", async () =>
     await app.close();
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("legacy registries drop project-scoped devices and PC identities", async () => {
+  const root = await mkdtemp(join(tmpdir(), "nautilus-migrate-"));
+  const registryPath = join(root, "registry.sqlite");
+  try {
+    const legacy = new DatabaseSync(registryPath);
+    legacy.exec(`
+      CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, remote_path TEXT NOT NULL,
+        dev_command TEXT NOT NULL, dev_port INTEGER NOT NULL, preview_path TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'inactive', last_error TEXT, started_at TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE pairing_codes (id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        code_hash TEXT NOT NULL UNIQUE, device_name TEXT NOT NULL, expires_at TEXT NOT NULL,
+        used_at TEXT, created_at TEXT NOT NULL);
+      CREATE TABLE devices (id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL,
+        last_seen_at TEXT, revoked_at TEXT);
+      CREATE TABLE pc_identities (id TEXT PRIMARY KEY, project_id TEXT NOT NULL,
+        public_key TEXT NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT);
+      CREATE INDEX devices_project ON devices(project_id);
+      INSERT INTO projects VALUES ('demo', 'Demo', '/tmp/demo', 'pnpm dev', 3100, '/preview/demo/',
+        'inactive', NULL, NULL, '2026-01-01', '2026-01-01');
+      INSERT INTO devices VALUES ('phone-1', 'demo', 'Old phone', 'hash', '2026-01-01', NULL, NULL);
+      INSERT INTO pc_identities VALUES ('pc-1', 'demo', 'ssh-ed25519 AAAA', '2026-01-01', NULL);
+    `);
+    legacy.close();
+
+    const registry = new Registry(registryPath);
+    expect(registry.listDevices()).toEqual([
+      {
+        id: "phone-1",
+        name: "Old phone",
+        createdAt: "2026-01-01",
+        lastSeenAt: null,
+        revokedAt: null,
+      },
+    ]);
+    const pairing = registry.createPairingCode(
+      "New phone",
+      new Date(Date.now() + 60_000).toISOString(),
+    );
+    expect(registry.redeemPairingCode(pairing.code, "New phone").device.name).toBe("New phone");
+    registry.close();
+
+    const check = new DatabaseSync(registryPath);
+    const tables = check
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+      .all()
+      .map((row) => (row as { name: string }).name);
+    expect(tables).not.toContain("pc_identities");
+    const deviceColumns = check
+      .prepare("PRAGMA table_info(devices)")
+      .all()
+      .map((row) => (row as { name: string }).name);
+    expect(deviceColumns).not.toContain("project_id");
+    check.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("project start waits for the dev server and stop terminates it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "nautilus-test-"));
+  const serverScript = join(root, "server.js");
+  await writeFile(
+    serverScript,
+    "require('http').createServer((_, response) => response.end('ok')).listen(3211)\n",
+  );
+  const app = await createNautilusApp({
+    registryPath: ":memory:",
+    authSecret: testSecret,
+    projects: [
+      project({
+        remotePath: root,
+        devCommand: `node ${serverScript}`,
+        devPort: 3211,
+      }),
+    ],
+    logger: new Logger(() => undefined),
+    devReadyTimeoutMs: 2000,
+  });
+  const ports = await listen(app);
+
+  try {
+    const started = await request(ports, "POST", "/api/projects/demo/start", {
+      control: true,
+    });
+    expect(started.status).toBe(200);
+    expect((started.body.project as { state: string }).state).toBe("running");
+
+    const stopped = await request(ports, "POST", "/api/projects/demo/stop", {
+      control: true,
+    });
+    expect(stopped.status).toBe(200);
+    expect((stopped.body.project as { state: string }).state).toBe("stopped");
+  } finally {
+    await app.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+async function recoveryFixture(port: number) {
+  const root = await mkdtemp(join(tmpdir(), "nautilus-recovery-"));
+  const serverScript = join(root, "server.js");
+  await writeFile(
+    serverScript,
+    `require('http').createServer((_, response) => response.end('ok')).listen(${String(port)})\n`,
+  );
+  const runtime = await mkdtemp(join(tmpdir(), "nautilus-recovery-state-"));
+  const registryPath = join(runtime, "registry.sqlite");
+  const shadowRoot = join(runtime, "shadow");
+  const statePath = join(runtime, "sync-state");
+  const shadow = new ShadowGit({
+    gitDir: join(shadowRoot, "demo.git"),
+    workTree: root,
+  });
+  const head = await shadow.snapshot("Validated recovery checkpoint");
+  await mkdir(join(statePath, "demo"), { recursive: true });
+  await writeFile(join(statePath, "demo", "base.json"), JSON.stringify(head));
+  const configured = project({
+    remotePath: root,
+    devCommand: `node ${serverScript}`,
+    devPort: port,
+  });
+  const registry = new Registry(registryPath);
+  registry.upsertProject(configured);
+  registry.updateProjectState(configured.id, "running", null);
+  registry.setActiveProjectId(configured.id);
+  registry.close();
+  const boot = () =>
+    createNautilusApp({
+      registryPath,
+      authSecret: testSecret,
+      projects: [configured],
+      logger: new Logger(() => undefined),
+      devReadyTimeoutMs: 2000,
+      sync: new RunnerSyncCoordinator({
+        projects: [configured],
+        shadowRoot,
+        statePath,
+
+        client: new TunnelSyncClient({
+          endpoint: "http://127.0.0.1:9/v1/sync",
+        }),
+      }),
+    });
+  const cleanup = async () => {
+    await rm(root, { recursive: true, force: true });
+    await rm(runtime, { recursive: true, force: true });
+  };
+  return { root, statePath, boot, cleanup };
+}
+
+test("startup validates the shadow and restores the active dev server", async () => {
+  const fixture = await recoveryFixture(3215);
+  const app = await fixture.boot();
+  const ports = await listen(app);
+  try {
+    const health = await request(ports, "GET", "/health/ready");
+    expect(health.status).toBe(200);
+    expect((health.body.activeProject as ProjectRecord).state).toBe("running");
+  } finally {
+    await app.close();
+    await fixture.cleanup();
+  }
+});
+
+test("startup refuses to serve a worktree that no longer matches its checkpoint", async () => {
+  const fixture = await recoveryFixture(3216);
+
+  await writeFile(join(fixture.root, "rolled-back.txt"), "restored from an older disk\n");
+  const app = await fixture.boot();
+  try {
+    const record = app.registry.getProject("demo");
+    expect(record).toMatchObject({
+      state: "unhealthy",
+      lastError: "shadow_worktree_changed",
+    });
+    expect(app.lifecycle.snapshot().degradedProjects).toContain("demo");
+  } finally {
+    await app.close();
+    await fixture.cleanup();
+  }
+});
+
+test("startup refuses a project whose last checkpoint was cut off", async () => {
+  const fixture = await recoveryFixture(3217);
+  await writeFile(
+    join(fixture.statePath, "demo", "checkpoint.pending.json"),
+    JSON.stringify({
+      sessionId: "s",
+      previousHead: null,
+      createdAt: new Date().toISOString(),
+    }),
+  );
+  const app = await fixture.boot();
+  try {
+    expect(app.registry.getProject("demo")).toMatchObject({
+      state: "unhealthy",
+      lastError: "checkpoint_incomplete",
+    });
+  } finally {
+    await app.close();
+    await fixture.cleanup();
+  }
+});
+
+test("starting a second project stops the previously active project", async () => {
+  const root = await mkdtemp(join(tmpdir(), "nautilus-switch-"));
+  const firstScript = join(root, "first.js");
+  const secondScript = join(root, "second.js");
+  await writeFile(
+    firstScript,
+    "require('http').createServer((_, response) => response.end('ok')).listen(3213)\n",
+  );
+  await writeFile(
+    secondScript,
+    "require('http').createServer((_, response) => response.end('ok')).listen(3214)\n",
+  );
+  const app = await createNautilusApp({
+    registryPath: ":memory:",
+    authSecret: testSecret,
+    projects: [
+      project({
+        id: "first",
+        remotePath: root,
+        devCommand: `node ${firstScript}`,
+        devPort: 3213,
+      }),
+      project({
+        id: "second",
+        remotePath: root,
+        devCommand: `node ${secondScript}`,
+        devPort: 3214,
+      }),
+    ],
+    logger: new Logger(() => undefined),
+    devReadyTimeoutMs: 2000,
+  });
+  const ports = await listen(app);
+
+  try {
+    expect(
+      (
+        await request(ports, "POST", "/api/projects/first/start", {
+          control: true,
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await request(ports, "POST", "/api/projects/second/start", {
+          control: true,
+        })
+      ).status,
+    ).toBe(200);
+    const projects = (await request(ports, "GET", "/api/projects", { control: true })).body
+      .projects as ProjectRecord[];
+    expect(projects.find((entry) => entry.id === "first")?.state).toBe("stopped");
+    expect(projects.find((entry) => entry.id === "second")?.state).toBe("running");
+  } finally {
+    await app.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("project start fails safely when the remote path is not a directory", async () => {
+  const app = await createNautilusApp({
+    registryPath: ":memory:",
+    authSecret: testSecret,
+    projects: [project({ remotePath: "/path/that/does/not/exist" })],
+    logger: new Logger(() => undefined),
+    devReadyTimeoutMs: 100,
+  });
+  const ports = await listen(app);
+
+  try {
+    const response = await request(ports, "POST", "/api/projects/demo/start", {
+      control: true,
+    });
+    expect(response.status).toBe(409);
+    expect(
+      (await request(ports, "GET", "/api/projects/demo", { control: true })).body.project,
+    ).toBeDefined();
+  } finally {
+    await app.close();
+  }
+});
+
+test("the dev command is told its port through PORT", async () => {
+  const root = await mkdtemp(join(tmpdir(), "nautilus-port-"));
+  await writeFile(
+    join(root, "server.js"),
+    "require('http').createServer((_, response) => response.end('ok')).listen(Number(process.env.PORT))\n",
+  );
+  const previousPort = process.env.PORT;
+  process.env.PORT = "4000";
+  const app = await createNautilusApp({
+    registryPath: ":memory:",
+    authSecret: testSecret,
+    projects: [
+      project({
+        remotePath: root,
+        devCommand: "node server.js",
+        devPort: 3219,
+      }),
+    ],
+    logger: new Logger(() => undefined),
+    devReadyTimeoutMs: 2000,
+  });
+  const ports = await listen(app);
+
+  try {
+    const started = await request(ports, "POST", "/api/projects/demo/start", {
+      control: true,
+    });
+    expect(started.status).toBe(200);
+  } finally {
+    if (previousPort === undefined) {
+      delete process.env.PORT;
+    } else {
+      process.env.PORT = previousPort;
+    }
+    await app.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a configured preview origin turns a preview token into a full link", async () => {
+  const app = await createNautilusApp({
+    registryPath: ":memory:",
+    authSecret: testSecret,
+    projects: [project()],
+    logger: new Logger(() => undefined),
+    previewOrigin: "https://8081-studio.cloudspaces.litng.ai",
+  });
+  const ports = await listen(app);
+
+  try {
+    const issued = await request(ports, "POST", "/api/projects/demo/preview-token", {
+      control: true,
+      body: { ttlSeconds: 60 },
+    });
+    expect(issued.status).toBe(201);
+    const body = issued.body as { token: string; previewUrl: string };
+    expect(body.previewUrl).toBe(
+      `https://8081-studio.cloudspaces.litng.ai/?token=${encodeURIComponent(body.token)}`,
+    );
+  } finally {
+    await app.close();
+  }
+});
+
+test("a dev command that dies on start has its output logged", async () => {
+  const root = await mkdtemp(join(tmpdir(), "nautilus-crash-"));
+  await writeFile(
+    join(root, "crash.js"),
+    "console.error('boom: missing module'); process.exit(1);\n",
+  );
+  const lines: string[] = [];
+  const app = await createNautilusApp({
+    registryPath: ":memory:",
+    authSecret: testSecret,
+    projects: [project({ remotePath: root, devCommand: "node crash.js", devPort: 3216 })],
+    logger: new Logger((line) => lines.push(line)),
+    devReadyTimeoutMs: 2000,
+  });
+  const ports = await listen(app);
+
+  try {
+    const response = await request(ports, "POST", "/api/projects/demo/start", {
+      control: true,
+    });
+    expect(response.status).toBe(409);
+    const output = lines.find((line) => line.includes("project_process_output"));
+    expect(output).toContain("boom: missing module");
+  } finally {
+    await app.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a failed dependency install reports pnpm's reason", async () => {
+  const root = await mkdtemp(join(tmpdir(), "nautilus-install-fail-"));
+  const bin = await mkdtemp(join(tmpdir(), "nautilus-bin-"));
+  await writeFile(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+  await writeFile(
+    join(bin, "pnpm"),
+    "#!/bin/sh\necho ' ERR_PNPM_OUTDATED_LOCKFILE  Cannot install' >&2\nexit 1\n",
+    { mode: 0o755 },
+  );
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${bin}:${previousPath ?? ""}`;
+  const app = await createNautilusApp({
+    registryPath: ":memory:",
+    authSecret: testSecret,
+    projects: [
+      project({
+        remotePath: root,
+        devCommand: "node server.js",
+        devPort: 3218,
+      }),
+    ],
+    logger: new Logger(() => undefined),
+    devReadyTimeoutMs: 2000,
+  });
+  const ports = await listen(app);
+
+  try {
+    const started = await request(ports, "POST", "/api/projects/demo/start", {
+      control: true,
+    });
+    expect(started.status).toBe(409);
+    const record = (await request(ports, "GET", "/api/projects/demo", { control: true })).body
+      .project as ProjectRecord;
+    expect(record.lastError).toBe("dependency_install_failed:ERR_PNPM_OUTDATED_LOCKFILE");
+  } finally {
+    process.env.PATH = previousPath;
+    await app.close();
+    await rm(root, { recursive: true, force: true });
+    await rm(bin, { recursive: true, force: true });
+  }
+});
+
+test("a pnpm project is installed before its dev command runs when its lockfile changed", async () => {
+  const root = await mkdtemp(join(tmpdir(), "nautilus-install-"));
+  const bin = await mkdtemp(join(tmpdir(), "nautilus-bin-"));
+  await writeFile(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+  await writeFile(
+    join(root, "server.js"),
+    "require('node:fs').statSync('node_modules');\n" +
+      "require('http').createServer((_, response) => response.end('ok')).listen(3217)\n",
+  );
+  await writeFile(
+    join(bin, "pnpm"),
+    "#!/bin/sh\nmkdir -p node_modules/.pnpm\ncp pnpm-lock.yaml node_modules/.pnpm/lock.yaml\necho run >> installs\n",
+    { mode: 0o755 },
+  );
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${bin}:${previousPath ?? ""}`;
+  const app = await createNautilusApp({
+    registryPath: ":memory:",
+    authSecret: testSecret,
+    projects: [
+      project({
+        remotePath: root,
+        devCommand: "node server.js",
+        devPort: 3217,
+      }),
+    ],
+    logger: new Logger(() => undefined),
+    devReadyTimeoutMs: 2000,
+  });
+  const ports = await listen(app);
+
+  try {
+    const started = await request(ports, "POST", "/api/projects/demo/start", {
+      control: true,
+    });
+    expect(started.status).toBe(200);
+    expect(existsSync(join(root, "node_modules"))).toBe(true);
+
+    await request(ports, "POST", "/api/projects/demo/stop", { control: true });
+    await request(ports, "POST", "/api/projects/demo/start", { control: true });
+    expect(await readFile(join(root, "installs"), "utf8")).toBe("run\n");
+    await request(ports, "POST", "/api/projects/demo/stop", { control: true });
+    await writeFile(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n# changed\n");
+    const restarted = await request(ports, "POST", "/api/projects/demo/start", {
+      control: true,
+    });
+    expect(restarted.status).toBe(200);
+    expect(await readFile(join(root, "installs"), "utf8")).toBe("run\nrun\n");
+  } finally {
+    process.env.PATH = previousPath;
+    await app.close();
+    await rm(root, { recursive: true, force: true });
+    await rm(bin, { recursive: true, force: true });
   }
 });
