@@ -1,0 +1,11 @@
+{
+  "//": "`exactOptionalPropertyTypes` is off here only. Every JSX violation is a prop handed to @astryxdesign, whose types are declared as `prop?: T`, so a conditionally-absent value would need a spread at every call site. The wire types and the runner keep the flag on.",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "exactOptionalPropertyTypes": false,
+    "jsx": "react-jsx",
+    "noEmit": true,
+    "types": ["vite/client"]
+  },
+  "include": ["src", "test", "vite.config.ts"]
+}
