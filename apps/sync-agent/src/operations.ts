@@ -13,6 +13,7 @@ import {
   writeJson,
 } from "@nautilus/shadow-git";
 import type {
+  SyncBundle,
   SyncConflict,
   SyncDiff,
   SyncEvent,
@@ -93,7 +94,7 @@ export class SyncAgent {
       : this.config.projects;
   }
 
-  async handle(value: unknown): Promise<SyncResponse> {
+  async handle(value: unknown, rawBundle?: Uint8Array): Promise<SyncResponse> {
     let request: SyncRequest;
     try {
       request = validateSyncRequest(value);
@@ -128,7 +129,7 @@ export class SyncAgent {
           return { ...cached, replayed: true };
         }
         await this.authenticate(request);
-        const result = await this.dispatch(request, project);
+        const result = await this.dispatch(request, project, rawBundle);
         await this.cacheResponse(request, result, project);
         if (result.status !== "ok") await this.recordFailure(request, project, result);
         return result;
@@ -160,12 +161,20 @@ export class SyncAgent {
     }
   }
 
-  private async dispatch(request: SyncRequest, project: AgentProject): Promise<SyncResponse> {
+  private async dispatch(
+    request: SyncRequest,
+    project: AgentProject,
+    rawBundle?: Uint8Array,
+  ): Promise<SyncResponse> {
     switch (request.operation) {
       case "state":
         return this.state(request, project);
       case "preview":
         return this.preview(request, project);
+      case "create_bundle":
+        return this.createBundle(request, project);
+      case "import_bundle":
+        return this.importBundle(request, project, rawBundle);
       case "history":
         return this.history(request, project);
       default:
@@ -205,6 +214,87 @@ export class SyncAgent {
         changes,
       },
       diff: changes,
+    });
+  }
+
+  private async createBundle(request: SyncRequest, project: AgentProject): Promise<SyncResponse> {
+    const git = await this.git(project);
+    const head = await git.snapshot(`Nautilus local snapshot ${now()}`);
+
+    const baseHead = await this.reconcileBase(request, project, git);
+    const directory = this.projectDirectory(project, "bundles");
+    const bundle = await git.createBundle(head, directory, baseHead);
+
+    await rm(join(directory, `${head}.bundle`), { force: true });
+    if (bundle.bytes.length > this.config.maxBundleBytes) {
+      throw new SyncAgentError(
+        "invalid",
+        "bundle_too_large",
+        "Bundle exceeds the configured size limit",
+      );
+    }
+    return response(request.requestId, {
+      status: "ok",
+      bundle: {
+        head: bundle.head,
+        sha256: bundle.sha256,
+        bytesBase64: Buffer.from(bundle.bytes).toString("base64"),
+      },
+      state: {
+        projectId: project.id,
+        head,
+        baseHead,
+        dirty: false,
+
+        changes: emptyDiff(),
+      },
+    });
+  }
+
+  private async importBundle(
+    request: SyncRequest,
+    project: AgentProject,
+    rawBundle?: Uint8Array,
+  ): Promise<SyncResponse> {
+    const payload = request.payload;
+    if (typeof payload.head !== "string" || typeof payload.sha256 !== "string") {
+      throw new SyncAgentError("invalid", "invalid_bundle", "Bundle metadata is incomplete");
+    }
+    const bytes = rawBundle
+      ? Buffer.from(rawBundle)
+      : typeof payload.bytesBase64 === "string"
+        ? Buffer.from(payload.bytesBase64, "base64")
+        : undefined;
+    if (!bytes) {
+      throw new SyncAgentError("invalid", "invalid_bundle", "Bundle body is missing");
+    }
+    if (bytes.length > this.config.maxBundleBytes) {
+      throw new SyncAgentError(
+        "invalid",
+        "bundle_too_large",
+        "Bundle exceeds the configured size limit",
+      );
+    }
+    const digest = createHash("sha256").update(bytes).digest("hex");
+    if (digest !== payload.sha256 || (request.digest !== undefined && request.digest !== digest)) {
+      throw new SyncAgentError("invalid", "bundle_digest_mismatch", "Bundle digest does not match");
+    }
+    const bundle: SyncBundle = {
+      bytes,
+      sha256: payload.sha256,
+      head: payload.head,
+    };
+    const git = await this.git(project);
+    await git.importBundle(bundle, request.baseHead);
+    return response(request.requestId, {
+      status: "ok",
+      state: {
+        projectId: project.id,
+        head: await git.head(),
+        baseHead: request.baseHead,
+        dirty: !(await git.isClean()),
+        changes: emptyDiff(),
+      },
     });
   }
 
