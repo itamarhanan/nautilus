@@ -1,6 +1,29 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import type { ProjectConfig, ProjectRecord, ProjectState } from "@nautilus/types";
+
+type ProjectRow = {
+  id: string;
+  name: string;
+  remotePath: string;
+  devCommand: string;
+  devPort: number;
+  previewPath: string;
+  state: ProjectState;
+  lastError: string | null;
+  startedAt: string | null;
+  firstSyncAt: string | null;
+  updatedAt: string;
+};
+
+function now(): string {
+  return new Date().toISOString();
+}
+
+function mapProject(row: ProjectRow): ProjectRecord {
+  return row;
+}
 
 export class Registry {
   private readonly db: DatabaseSync;
@@ -198,5 +221,138 @@ export class Registry {
   isReady(): boolean {
     this.db.exec("SELECT 1");
     return true;
+  }
+
+  getActiveProjectId(): string | undefined {
+    const row = this.db
+      .prepare("SELECT value FROM server_state WHERE key = 'active_project_id'")
+      .get() as { value: string } | undefined;
+    return row?.value;
+  }
+
+  activeDevPort(projectId: string): number | null {
+    return this.getProject(projectId)?.devPort ?? null;
+  }
+
+  activeDevTarget(projectId: string): string | null {
+    const row = this.db
+      .prepare("SELECT value FROM server_state WHERE key = ?")
+      .get(`dev_target:${projectId}`) as { value: string } | undefined;
+    if (row) return row.value;
+    const port = this.activeDevPort(projectId);
+    return port === null ? null : `http://127.0.0.1:${String(port)}`;
+  }
+
+  setActiveDevTarget(projectId: string, target: string | null): void {
+    const key = `dev_target:${projectId}`;
+    if (target === null) {
+      this.db.prepare("DELETE FROM server_state WHERE key = ?").run(key);
+      return;
+    }
+    this.db
+      .prepare(
+        "INSERT INTO server_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      )
+      .run(key, target);
+  }
+
+  setActiveProjectId(projectId: string | null): void {
+    if (projectId === null) {
+      this.db.prepare("DELETE FROM server_state WHERE key = 'active_project_id'").run();
+      return;
+    }
+    this.db
+      .prepare(
+        "INSERT INTO server_state (key, value) VALUES ('active_project_id', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      )
+      .run(projectId);
+  }
+
+  upsertProject(config: ProjectConfig): ProjectRecord {
+    const timestamp = now();
+    this.db
+      .prepare(
+        `
+      INSERT INTO projects (id, name, remote_path, dev_command, dev_port, preview_path, state, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'inactive', ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name = excluded.name,
+        remote_path = excluded.remote_path,
+        dev_command = excluded.dev_command,
+        dev_port = excluded.dev_port,
+        preview_path = excluded.preview_path,
+        updated_at = excluded.updated_at
+    `,
+      )
+      .run(
+        config.id,
+        config.name,
+        config.remotePath,
+        config.devCommand,
+        config.devPort,
+        config.previewPath,
+        timestamp,
+        timestamp,
+      );
+    return this.getProject(config.id) as ProjectRecord;
+  }
+
+  getProject(id: string): ProjectRecord | undefined {
+    const row = this.db
+      .prepare(
+        `
+      SELECT id, name, remote_path AS remotePath, dev_command AS devCommand, dev_port AS devPort,
+        preview_path AS previewPath, state, last_error AS lastError, started_at AS startedAt,
+        first_sync_at AS firstSyncAt, updated_at AS updatedAt
+      FROM projects WHERE id = ?
+    `,
+      )
+      .get(id) as ProjectRow | undefined;
+    return row ? mapProject(row) : undefined;
+  }
+
+  listProjects(): ProjectRecord[] {
+    const rows = this.db
+      .prepare(
+        `
+      SELECT id, name, remote_path AS remotePath, dev_command AS devCommand, dev_port AS devPort,
+        preview_path AS previewPath, state, last_error AS lastError, started_at AS startedAt,
+        first_sync_at AS firstSyncAt, updated_at AS updatedAt
+      FROM projects ORDER BY name COLLATE NOCASE
+    `,
+      )
+      .all() as ProjectRow[];
+    return rows.map(mapProject);
+  }
+
+  updateProjectName(id: string, name: string): void {
+    this.db
+      .prepare("UPDATE projects SET name = ?, updated_at = ? WHERE id = ?")
+      .run(name, now(), id);
+  }
+
+  updateProjectState(
+    id: string,
+    state: ProjectState,
+    lastError: string | null,
+    startedAt: string | null = null,
+  ): void {
+    this.db
+      .prepare(
+        "UPDATE projects SET state = ?, last_error = ?, started_at = ?, updated_at = ? WHERE id = ?",
+      )
+      .run(state, lastError, startedAt, now(), id);
+  }
+
+  markFirstSync(id: string): void {
+    this.db
+      .prepare(
+        "UPDATE projects SET first_sync_at = ?, updated_at = ? WHERE id = ? AND first_sync_at IS NULL",
+      )
+      .run(now(), now(), id);
+  }
+
+  deleteProject(id: string): void {
+    this.db.prepare("DELETE FROM projects WHERE id = ?").run(id);
   }
 }
