@@ -25,6 +25,55 @@ export type HealthResponse = {
   activeProject?: ProjectRecord | undefined;
 };
 
+export type SyncDirection = "pull" | "push";
+
+export type SyncOperation =
+  | "health"
+  | "state"
+  | "preview"
+  | "create_bundle"
+  | "import_bundle"
+  | "preflight"
+  | "apply"
+  | "history";
+
+export type SyncStatus =
+  | "ok"
+  | "offline"
+  | "conflict"
+  | "stale"
+  | "invalid"
+  | "failed"
+  | "recovering";
+
+export type ConflictChange = "added" | "modified" | "deleted";
+
+export type SyncConflict = {
+  path: string;
+  reason: string;
+  pc?: ConflictChange | undefined;
+  runner?: ConflictChange | undefined;
+};
+
+export type ConflictResolution = "pc" | "runner";
+
+export type SyncResolutions = Record<string, ConflictResolution>;
+
+const maxResolutions = 1_000;
+
+export function parseResolutions(value: unknown): SyncResolutions {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
+  const resolutions: SyncResolutions = {};
+  for (const [path, side] of Object.entries(value as Record<string, unknown>).slice(
+    0,
+    maxResolutions,
+  )) {
+    if (path.length === 0 || path.length > 4096 || path.includes("\0")) continue;
+    if (side === "pc" || side === "runner") resolutions[path] = side;
+  }
+  return resolutions;
+}
+
 export type ProjectId = string;
 
 export type ProjectState =
