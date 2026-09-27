@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+<defs>
+<linearGradient id="tile" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#111418"/><stop offset="1" stop-color="#1f252c"/></linearGradient>
+<linearGradient id="shell" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#c9d3dc"/></linearGradient>
+</defs>
+<rect width="1024" height="1024" rx="232" fill="url(#tile)"/>
+<path d="M265.9 207.7L555.6 220.3L758.2 441.4L749 653.2L579 611.2L582.1 539.5L504.3 454.5L399.7 449.9L269.2 356.5ZM732.4 680L592.9 807.8L524.7 678.7L567.7 639.3ZM563.2 815.9L428.6 810L458.7 688.4L496.8 690.1ZM401.8 793.4L312.8 696.2L403.9 648.1L430.6 677.1ZM304.7 666.6L308.7 575.4L393.6 596.3L392.6 620.2ZM325.3 548.6L383.2 495.5L391.6 564.9ZM411.6 480.4L490.5 483.9L551.6 550.6L548.8 616L500.5 660.2L453.9 658.2L422.4 623.8L424.2 584.1Z" fill="url(#shell)"/>
+</svg>
