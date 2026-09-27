@@ -1,0 +1,21 @@
+{
+  "name": "@nautilus/sync-agent",
+  "version": "0.0.0",
+  "private": true,
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "build": "tsdown",
+    "start": "node dist/cli.js",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@nautilus/shadow-git": "workspace:*",
+    "@nautilus/types": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.0",
+    "tsdown": "0.23.0",
+    "typescript": "5.9.3"
+  }
+}
