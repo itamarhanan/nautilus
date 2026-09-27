@@ -1,0 +1,6 @@
+{
+  "//": "Typechecks without a prior `next build`, so the `.next/types` glob in tsconfig.json cannot fail on a clean checkout.",
+  "extends": "./tsconfig.json",
+  "include": ["**/*.ts", "**/*.tsx", "next-env.d.ts"],
+  "exclude": ["node_modules", ".next", ".next-check", "dist"]
+}

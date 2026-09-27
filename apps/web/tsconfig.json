@@ -1,0 +1,20 @@
+{
+  "//": "`exactOptionalPropertyTypes` is off here only. Every remaining violation is a prop handed to @astryxdesign, whose types are declared as `prop?: T`, so passing a conditionally-absent value would mean a spread per prop at every call site. The wire types and the runner keep the flag on.",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "exactOptionalPropertyTypes": false,
+    "jsx": "react-jsx",
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "noEmit": true,
+    "incremental": true,
+    "paths": {
+      "@/*": ["./*"]
+    }
+  },
+  "include": ["**/*.ts", "**/*.tsx", ".next/types/**/*.ts", "next-env.d.ts"],
+  "exclude": ["node_modules", ".next", ".next-check", "dist"]
+}
