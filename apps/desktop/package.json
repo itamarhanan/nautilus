@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/bundle-agent.mjs && vite build",
+    "build:packages": "pnpm --workspace-root exec turbo run build --filter=@nautilus/desktop^... --filter=@nautilus/sync-agent^...",
     "dev": "node scripts/bundle-agent.mjs && vite",
     "dev:local": "node scripts/dev-desktop-entry.mjs && tauri dev",
     "tauri:dev": "node scripts/dev-desktop-entry.mjs && tauri dev",
