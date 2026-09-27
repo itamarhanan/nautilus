@@ -133,6 +133,138 @@ export type SyncState = {
 
   excludedRepositories?: string[] | undefined;
 };
+
+export type SyncBundle = {
+  bytes: Uint8Array<ArrayBuffer>;
+  sha256: string;
+  head: string;
+};
+
+export type SyncRequest = {
+  version: 1;
+  requestId: string;
+  operation: SyncOperation;
+  projectId: string;
+  grant: string;
+  issuedAt: string;
+  expiresAt: string;
+  nonce: string;
+  baseHead: string | null;
+  expectedLocalHead: string | null;
+  expectedRemoteHead: string | null;
+  payload: Record<string, unknown>;
+  digest?: string | undefined;
+};
+
+export type SyncGrant = {
+  version: 1;
+  grantId: string;
+  projectId: string;
+  direction: SyncDirection;
+  issuedAt: string;
+  expiresAt: string;
+};
+
+export type SyncGrantResponse = {
+  grant: string;
+  claims: SyncGrant;
+};
+
+export type SyncStatusResponse = {
+  projectId: string;
+  neverSynced: boolean;
+  baseHead: string | null;
+  head: string | null;
+  changedFiles: number;
+  changedPaths: string[];
+  lastCheckpointAt: string | null;
+  lastSyncAt: string | null;
+
+  excludedRepositories: string[];
+};
+
+export type LocalSyncStatusResponse = {
+  projectId: string;
+  neverSynced: boolean;
+  baseHead: string | null;
+  changedFiles: number;
+  changedPaths: string[];
+
+  undoablePull: UndoablePull | null;
+};
+
+export type SyncError = {
+  code: string;
+  message: string;
+  conflicts?: SyncConflict[] | undefined;
+};
+
+export type SyncBundleWire = {
+  head: string;
+  sha256: string;
+  bytesBase64: string;
+};
+
+export type SyncResponse = {
+  version: 1;
+  requestId: string;
+  status: SyncStatus;
+  replayed?: boolean | undefined;
+  state?: SyncState | undefined;
+  diff?: SyncDiff | undefined;
+  conflicts?: SyncConflict[] | undefined;
+  history?: SyncEvent[] | undefined;
+  bundle?: SyncBundleWire | undefined;
+  applyToken?: string | undefined;
+  error?: SyncError | undefined;
+};
+
+export type SyncEvent = {
+  requestId: string;
+  projectId: string;
+  direction: SyncDirection | "system";
+  status: SyncStatus;
+  baseHead: string | null;
+  localHead: string | null;
+  remoteHead: string | null;
+  errorCode: string | null;
+  conflicts: SyncConflict[];
+  createdAt: string;
+  committedAt: string | null;
+
+  undone?: boolean | undefined;
+};
+
+export type UndoablePull = {
+  requestId: string;
+  pulledAt: string;
+
+  localHead: string;
+
+  remoteHead: string;
+
+  previousBaseHead: string;
+};
+
+export type SyncTransaction = {
+  requestId: string;
+  projectId: string;
+  direction: SyncDirection;
+  status: "prepared" | "applied" | "committed" | "rolled_back" | "failed";
+  baseHead: string | null;
+  expectedLocalHead: string | null;
+  expectedRemoteHead: string | null;
+  preflight: string;
+  recoveryPath: string | null;
+  previousBaseHead: string | null;
+
+  resultHead?: string | undefined;
+
+  undoneAt?: string | undefined;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type ProjectId = string;
 
 export type ProjectState =
