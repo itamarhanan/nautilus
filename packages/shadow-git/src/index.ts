@@ -14,6 +14,7 @@ import {
 import { join, relative, resolve, sep, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import {
+  type ConflictChange,
   isGeneratedFile,
   type SyncBundle,
   type SyncDiff,
@@ -106,6 +107,28 @@ export class ShadowGitError extends Error {
     this.name = "ShadowGitError";
   }
 }
+
+export type MergePick = "ours" | "theirs";
+
+type MergeEntry = { mode: string; oid: string };
+type MergeStages = {
+  base?: MergeEntry;
+  ours?: MergeEntry;
+  theirs?: MergeEntry;
+};
+
+export type MergeConflict = {
+  path: string;
+  reason: "content_conflict" | "delete_conflict" | "add_conflict";
+  ours: ConflictChange;
+  theirs: ConflictChange;
+};
+
+export type MergeResult = {
+  clean: boolean;
+  tree?: string;
+  conflicts?: MergeConflict[];
+};
 
 export type ShadowGitLimits = {
   maxFileBytes: number;
@@ -621,6 +644,159 @@ export class ShadowGit {
     }
     file.hunks = parseUnifiedDiff(output.toString("utf8"), Number.POSITIVE_INFINITY).hunks;
     return file;
+  }
+
+  async mergeTree(
+    baseHead: string,
+    oursHead: string,
+    theirsHead: string,
+    picks: Readonly<Record<string, MergePick>> = {},
+  ): Promise<MergeResult> {
+    const directory = await mkdtemp(join(tmpdir(), "nautilus-index-"));
+    const indexEnvironment = { GIT_INDEX_FILE: join(directory, "index") };
+    try {
+      await this.validateTree(oursHead);
+      await this.validateTree(theirsHead);
+
+      await this.git(
+        ["read-tree", "-m", "--aggressive", baseHead, oursHead, theirsHead],
+        indexEnvironment,
+      );
+      const conflicts: MergeConflict[] = [];
+      for (const [path, stages] of await this.unmergedStages(indexEnvironment)) {
+        const conflict = await this.resolvePath(
+          path,
+          stages,
+          picks[path],
+          directory,
+          indexEnvironment,
+        );
+        if (conflict) conflicts.push(conflict);
+      }
+      if (conflicts.length > 0) return { clean: false, conflicts };
+      const tree = (await this.git(["write-tree"], indexEnvironment)).toString("utf8").trim();
+      await this.validateTree(tree);
+      return { clean: true, tree };
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+
+  private async unmergedStages(
+    indexEnvironment: NodeJS.ProcessEnv,
+  ): Promise<Map<string, MergeStages>> {
+    const output = (await this.git(["ls-files", "--unmerged", "-z"], indexEnvironment)).toString(
+      "utf8",
+    );
+    const paths = new Map<string, MergeStages>();
+    for (const entry of output.split("\0").filter(Boolean)) {
+      const [metadata, path] = entry.split("\t", 2);
+      const [mode, oid, stage] = (metadata ?? "").split(" ");
+
+      if (!metadata || !path || !mode || !oid || !stage) {
+        throw new ShadowGitError("unmerged_index_unreadable", "The index has an unreadable entry");
+      }
+      const stages = paths.get(path) ?? {};
+      if (stage === "1") stages.base = { mode, oid };
+      if (stage === "2") stages.ours = { mode, oid };
+      if (stage === "3") stages.theirs = { mode, oid };
+      paths.set(path, stages);
+    }
+    return paths;
+  }
+
+  private async resolvePath(
+    path: string,
+    { base, ours, theirs }: MergeStages,
+    pick: MergePick | undefined,
+    directory: string,
+    indexEnvironment: NodeJS.ProcessEnv,
+  ): Promise<MergeConflict | null> {
+    if (pick) {
+      await this.setIndexEntry(path, pick === "ours" ? ours : theirs, indexEnvironment);
+      return null;
+    }
+    if (base && ours && theirs) {
+      const merged = await this.mergeFile(base, ours, theirs, directory);
+      if (merged) {
+        const mode = ours.mode === base.mode ? theirs.mode : ours.mode;
+        await this.setIndexEntry(path, { mode, oid: merged }, indexEnvironment);
+        return null;
+      }
+    }
+    const change = (entry: MergeEntry | undefined): ConflictChange =>
+      entry === undefined ? "deleted" : base === undefined ? "added" : "modified";
+    return {
+      path,
+      reason:
+        base === undefined
+          ? "add_conflict"
+          : ours && theirs
+            ? "content_conflict"
+            : "delete_conflict",
+      ours: change(ours),
+      theirs: change(theirs),
+    };
+  }
+
+  private async writeMergeBlob(entry: MergeEntry, path: string): Promise<string> {
+    await writeFile(path, await this.git(["cat-file", "blob", entry.oid]), {
+      mode: 0o600,
+    });
+    return path;
+  }
+
+  private async mergeFile(
+    base: MergeEntry,
+    ours: MergeEntry,
+    theirs: MergeEntry,
+    directory: string,
+  ): Promise<string | null> {
+    const [oursPath, basePath, theirsPath] = await Promise.all([
+      this.writeMergeBlob(ours, join(directory, "merge-0")),
+      this.writeMergeBlob(base, join(directory, "merge-1")),
+      this.writeMergeBlob(theirs, join(directory, "merge-2")),
+    ]);
+    try {
+      await this.git(["merge-file", "-q", oursPath, basePath, theirsPath]);
+    } catch {
+      return null;
+    }
+    return (await this.git(["hash-object", "-w", "--no-filters", oursPath]))
+      .toString("utf8")
+      .trim();
+  }
+
+  private async setIndexEntry(
+    path: string,
+    entry: MergeEntry | undefined,
+    indexEnvironment: NodeJS.ProcessEnv,
+  ): Promise<void> {
+    await this.git(["update-index", "--force-remove", "--", path], indexEnvironment);
+    if (entry) {
+      await this.git(
+        ["update-index", "--add", "--cacheinfo", `${entry.mode},${entry.oid},${path}`],
+        indexEnvironment,
+      );
+    }
+  }
+
+  async applyTree(tree: string, parents: string[], message: string): Promise<string> {
+    const uniqueParents = [...new Set(parents)];
+    const commit = (
+      await this.git([
+        "commit-tree",
+        tree,
+        ...uniqueParents.flatMap((parent) => ["-p", parent]),
+        "-m",
+        message.slice(0, maxMessageLength),
+      ])
+    )
+      .toString("utf8")
+      .trim();
+    await this.git(["read-tree", "-u", "--reset", tree]);
+    await this.git(["update-ref", headRef, commit]);
+    return commit;
   }
 
   async restoreHead(head: string): Promise<void> {
