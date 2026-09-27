@@ -1,4 +1,6 @@
 import type {
+  ModelRef,
+  ModelsResponse,
   ProjectConfig,
   SessionEvent,
   SessionRecord,
@@ -25,6 +27,8 @@ const SUBAGENT_TERMINAL: ReadonlySet<SessionEvent["type"]> = new Set([
   "session.error",
   "session.interrupted",
 ]);
+
+const RETRYABLE: ReadonlySet<SessionStatus> = new Set(["interrupted", "error"]);
 
 const DELTA_EVENT = "message.part.delta";
 const MAX_ANCESTOR_DEPTH = 4;
@@ -394,5 +398,135 @@ export class SessionService {
         this.listeners.delete(id);
       }
     };
+  }
+
+  async prompt(
+    id: string,
+    text: string,
+    { retry = false, model }: { retry?: boolean; model?: ModelRef | undefined } = {},
+  ): Promise<void> {
+    const { session } = this.assertPromptable(id, retry);
+    this.recordPrompt(id, text, model, retry);
+    try {
+      await this.openCode.prompt(
+        session.openCodeSessionId,
+        this.projectPath(session.projectId),
+        text,
+        model,
+      );
+    } catch (error) {
+      const failed = this.registry.appendAgentSessionEvent(id, "session.error", {
+        error: error instanceof Error ? error.message : "prompt_failed",
+      });
+      this.registry.setAgentSessionStatus(id, "error", failed.sequence);
+      this.publish(failed);
+      this.logger.error("opencode_prompt_failed", {
+        sessionId: id,
+        error: error instanceof Error ? error.message : "unknown_error",
+      });
+      throw error;
+    }
+  }
+
+  private assertPromptable(id: string, retry: boolean): { session: SessionRecord } {
+    const session = this.registry.getAgentSession(id);
+    if (!session) {
+      throw new SessionError("session_not_found", "Session is not found");
+    }
+    if (session.status === "running") {
+      throw new SessionError("session_busy", "Wait for the agent to finish, or stop it");
+    }
+    if (retry && !RETRYABLE.has(session.status)) {
+      throw new SessionError(
+        "session_not_retryable",
+        "Only an interrupted or failed turn can be retried",
+      );
+    }
+    if (!this.projects.has(session.projectId)) {
+      throw new SessionError(
+        "project_not_configured",
+        "Project is not present in the server configuration",
+      );
+    }
+    return { session };
+  }
+
+  private recordPrompt(
+    id: string,
+    text: string,
+    model: ModelRef | undefined,
+    retry: boolean,
+  ): void {
+    if (!retry && !this.registry.hasUserPrompt(id)) {
+      this.registry.renameAgentSession(id, titleFromPrompt(text));
+    }
+    this.registry.setAgentSessionStatus(id, "running");
+    this.publish(
+      retry
+        ? this.registry.appendAgentSessionEvent(id, "session.retry", { reason: "retry" })
+        : this.registry.appendAgentSessionEvent(id, "session.message", {
+            message: model ? { role: "user", text, model } : { role: "user", text },
+          }),
+    );
+  }
+
+  listModels(): Promise<ModelsResponse> {
+    return this.openCode.listModels();
+  }
+
+  async retry(id: string): Promise<void> {
+    const session = this.registry.getAgentSession(id);
+    if (!session) {
+      throw new SessionError("session_not_found", "Session is not found");
+    }
+    const last = this.registry.getLastDurableUserPrompt(id);
+    if (!last) {
+      throw new SessionError("session_prompt_not_found", "This session has no prompt to retry");
+    }
+    await this.prompt(id, last.text, {
+      retry: true,
+      model: last.model ?? undefined,
+    });
+  }
+
+  async respondToPermission(
+    id: string,
+    permissionId: string,
+    response: "once" | "always" | "reject",
+  ): Promise<void> {
+    const session = this.registry.getAgentSession(id);
+    if (!session) {
+      throw new SessionError("session_not_found", "Session is not found");
+    }
+
+    const asked = this.registry
+      .listDurableAgentSessionEvents(id)
+      .some(
+        (event) =>
+          event.type === "session.permission" &&
+          event.payload.id === permissionId &&
+          event.payload.response === undefined,
+      );
+    if (!asked)
+      throw new SessionError("permission_not_found", "This session has no such permission request");
+    await this.openCode.respondToPermission(
+      permissionId,
+      response,
+      this.projectPath(session.projectId),
+    );
+  }
+
+  async interrupt(id: string): Promise<void> {
+    const session = this.registry.getAgentSession(id);
+    if (!session) {
+      throw new SessionError("session_not_found", "Session is not found");
+    }
+    await this.openCode.abort(session.openCodeSessionId);
+    this.registry.setAgentSessionStatus(id, "interrupted");
+    this.publish(
+      this.registry.appendAgentSessionEvent(id, "session.interrupted", {
+        reason: "user",
+      }),
+    );
   }
 }
