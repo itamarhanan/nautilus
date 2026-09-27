@@ -122,6 +122,117 @@ export const agent = {
   },
 };
 
+export const sync = {
+  blocked: {
+    notConnected: "Connect to the runner first",
+    agentNotRunning: "The sync agent is not running",
+    unknownProject: "The runner does not know this project",
+    inProgress: "A sync is in progress",
+    pushFirst: "Push first so both sides share a base",
+    waitingForStatus: "Waiting for the sync status",
+  },
+  state: {
+    unavailable: "Status unavailable",
+    checking: "Checking…",
+    notSynced: "Not synced yet",
+    waitingFirstPush: "Waiting for a first push",
+    noLocalChanges: "No local changes",
+    noAgentChanges: "No agent changes",
+    noAgentCheckpoints: "No agent checkpoints yet",
+    inSync: "In sync",
+    pushOnceForCopy: "Push once to give the agent a copy.",
+  },
+  action: {
+    reviewPush: "Review & push",
+    reviewPull: "Review & pull",
+  },
+  undo: {
+    title: "Undo pull",
+    confirmTitle: "Undo the last pull?",
+    description:
+      "This PC's files go back to how they were before the pull. The runner keeps its changes and offers them again on the next pull.",
+    unchanged: "Nothing has changed on this PC since.",
+  },
+  side: {
+    thisPc: "this PC",
+    theRunner: "the runner",
+  },
+  progress: {
+    pulling: "Pulling",
+    pushing: "Pushing",
+  },
+  verb: {
+    pull: "Pull",
+    push: "Push",
+  },
+  doneVerb: {
+    pull: "Pulled",
+    push: "Pushed",
+  },
+  count: {
+    localChanges: (count: number) => `${String(count)} local change${count === 1 ? "" : "s"}`,
+    fromAgent: (count: number) => `${String(count)} file${count === 1 ? "" : "s"} from the agent`,
+    conflicting: (count: number) => `${String(count)} conflicting file${count === 1 ? "" : "s"}`,
+  },
+};
+
+export const review = {
+  step: {
+    authorizing: "Authorizing this sync on the PC",
+    tunnel: "Opening the reverse SSH tunnel",
+    reviewing: "Comparing both sides",
+    applying: "Applying changes",
+    closing: "Closing the tunnel",
+  },
+  subtitle: {
+    pull: "Agent changes from the runner, merged into your files on this PC",
+    push: "Your changes on this PC, merged into the runner's copy",
+  },
+  preparingNote: "Nothing changes on either side until you apply.",
+  unknownError: "Unknown error",
+  conflictsTitle: (count: number) =>
+    `${String(count)} file${count === 1 ? "" : "s"} changed on both sides`,
+  resolvingDescription:
+    "Nothing was applied yet. Choose which version of each file to keep, then apply the rest of the changes with it. To combine both versions instead, cancel and edit the file on the PC first.",
+  blockedConflictDescription:
+    "Nothing was applied. Resolve these files on the PC (or ask the agent to), then review again.",
+  blockedStaleDescription: "The other side changed since this review started. Review again.",
+  alreadyMatch: "Nothing to move: both sides already match.",
+  nothingToApply: "Nothing to apply",
+  withTheseChoices: (verb: string) => `${verb} with these choices`,
+  chooseFiles: (count: number) => `Choose ${String(count)} file${count === 1 ? "" : "s"}`,
+  willChange: (count: number, side: string, summary: string) =>
+    `${String(count)} file${count === 1 ? "" : "s"} will change on ${side}${summary}.`,
+  failed: (verb: string) => `${verb} failed`,
+  blocked: (verb: string) => `${verb} blocked`,
+  done: (verb: string, count: number, side: string) =>
+    `${verb} ${String(count)} file${count === 1 ? "" : "s"} to ${side}.`,
+  tryAgain: "Try again",
+  reviewAgain: "Review again",
+  close: "Close",
+  cancel: "Cancel",
+  continueInBackground: "Continue in background",
+};
+
+export const projects = {
+  add: "Add project",
+  needsAttention: (count: number) => `${String(count)} ${count === 1 ? "needs" : "need"} attention`,
+  withChanges: (count: number) => `${String(count)} with changes to move`,
+  notOnRunner: "Not on runner",
+  registerAgain: "Register again",
+  registerHint: "Register it again, then push to restore its files.",
+  moreActions: (name: string) => `More actions for ${name}`,
+  open: "Open",
+  settings: "Project settings",
+  copyPath: "Copy path",
+  remove: "Remove…",
+  pathCopied: "Path copied",
+  openLabel: (name: string) => `Open ${name}`,
+  continueIn: (name: string) => `Continue in ${name}`,
+  toPush: "to push",
+  toPull: "to pull",
+};
+
 export const permission: {
   label: Record<string, string>;
   unknown: (name: string) => string;
