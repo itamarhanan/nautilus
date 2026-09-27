@@ -1,5 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { SyncBundle, SyncRequest, SyncResponse } from "@nautilus/types";
+import { join } from "node:path";
+import type {
+  ProjectConfig,
+  SyncBundle,
+  SyncEvent,
+  SyncRequest,
+  SyncResponse,
+  SyncStatusResponse,
+} from "@nautilus/types";
+import { readJson, ShadowGit, type ShadowGitLimits } from "@nautilus/shadow-git";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -212,5 +221,105 @@ export class TunnelSyncClient {
       reader.releaseLock();
     }
     return Buffer.concat(chunks);
+  }
+}
+
+type CoordinatorOptions = {
+  projects: ProjectConfig[];
+  shadowRoot: string;
+  statePath: string;
+  client: TunnelSyncClient;
+  onEvent?: (event: SyncEvent) => void | Promise<void>;
+  onFirstSync?: (projectId: string) => void | Promise<void>;
+  busy?: (projectId: string) => boolean;
+  limits?: Partial<ShadowGitLimits>;
+};
+
+export class SyncCoordinator {
+  private readonly projects: Map<string, ProjectConfig>;
+  private readonly gitByProject = new Map<string, ShadowGit>();
+
+  constructor(private readonly options: CoordinatorOptions) {
+    this.projects = new Map(options.projects.map((project) => [project.id, project]));
+  }
+
+  addProject(project: ProjectConfig): void {
+    this.projects.set(project.id, project);
+  }
+
+  connect(hooks: Pick<CoordinatorOptions, "onEvent" | "onFirstSync" | "busy">): void {
+    Object.assign(this.options, hooks);
+  }
+
+  async hasCode(projectId: string): Promise<boolean> {
+    this.project(projectId);
+    return (await this.base(projectId)) !== null;
+  }
+
+  async status(projectId: string): Promise<SyncStatusResponse> {
+    const project = this.project(projectId);
+    const git = await this.git(project);
+    const baseHead = await this.base(projectId);
+    const changedPaths = baseHead === null ? [] : await git.changedPaths(baseHead);
+    const events = await this.history(projectId);
+    const latest = (predicate: (event: SyncEvent) => boolean) =>
+      [...events].reverse().find((event) => predicate(event) && event.committedAt)?.committedAt ??
+      null;
+    return {
+      projectId,
+      excludedRepositories: await git.excludedRepositories(),
+      neverSynced: baseHead === null,
+      baseHead,
+      head: await git.head(),
+      changedFiles: changedPaths.length,
+      changedPaths: changedPaths.slice(0, 50),
+      lastCheckpointAt: latest((event) => event.direction === "system"),
+      lastSyncAt: latest((event) => event.direction !== "system" && event.status === "ok"),
+    };
+  }
+
+  async history(projectId: string): Promise<SyncEvent[]> {
+    this.project(projectId);
+    return readJson<SyncEvent[]>(this.eventsPath(projectId), []);
+  }
+
+  private async git(project: ProjectConfig): Promise<ShadowGit> {
+    const existing = this.gitByProject.get(project.id);
+    if (existing) return existing;
+    const git = new ShadowGit({
+      gitDir: join(this.options.shadowRoot, `${project.id}.git`),
+      workTree: project.remotePath,
+      limits: this.options.limits,
+    });
+    await git.initialize();
+    this.gitByProject.set(project.id, git);
+    return git;
+  }
+
+  private project(id: string): ProjectConfig {
+    const project = this.projects.get(id);
+    if (!project)
+      throw new SyncCoordinatorError(
+        "invalid",
+        "project_not_configured",
+        "Project is not configured",
+      );
+    return project;
+  }
+
+  private async base(projectId: string): Promise<string | null> {
+    return readJson<string | null>(this.basePath(projectId), null);
+  }
+
+  private projectState(projectId: string): string {
+    return join(this.options.statePath, projectId);
+  }
+
+  private eventsPath(projectId: string): string {
+    return join(this.projectState(projectId), "events.json");
+  }
+
+  private basePath(projectId: string): string {
+    return join(this.projectState(projectId), "base.json");
   }
 }
