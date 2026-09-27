@@ -9,7 +9,12 @@ import { GrantAuthority } from "../../sync-agent/src/grants";
 import { createSyncAgentServer } from "../../sync-agent/src/index";
 import { SyncAgent } from "../../sync-agent/src/operations";
 import { ShadowGit } from "@nautilus/shadow-git";
-import { SyncCoordinator, SyncOfflineError, TunnelSyncClient } from "../src/sync";
+import {
+  SyncCoordinator,
+  SyncCoordinatorError,
+  SyncOfflineError,
+  TunnelSyncClient,
+} from "../src/sync";
 
 const roots: string[] = [];
 
@@ -943,5 +948,62 @@ describe("shadow repository policy", () => {
     const full = await git.createBundle(head, directory, null);
     const incremental = await git.createBundle(head, directory, base);
     expect(incremental.bytes.length).toBeLessThan(full.bytes.length);
+  });
+});
+
+describe("a project is not ready until it has been pushed once", () => {
+  test("hasCode is false before a push, true after, and reading it creates nothing", async () => {
+    const local = await project("local");
+    const remote = await project("remote");
+    await writeFile(join(local.workTree, "README.md"), "from pc\n");
+    const agent = new SyncAgent(
+      {
+        host: "127.0.0.1",
+        port: 4100,
+        home: local.root,
+        transactionPath: join(local.root, "transactions"),
+        backupPath: join(local.root, "backups"),
+        projects: [
+          {
+            id: "demo",
+            name: "Demo",
+            localPath: local.workTree,
+            shadowPath: local.shadowPath,
+          },
+        ],
+        maxFileBytes: 10_000_000,
+        maxTotalBytes: 100_000_000,
+        maxFileCount: 10_000,
+        maxBundleBytes: 100_000_000,
+        requestTimeoutMs: 30_000,
+      },
+      () => undefined,
+    );
+    const firstSyncs: string[] = [];
+    const coordinator = new SyncCoordinator({
+      projects: [projectConfig(remote.workTree)],
+      shadowRoot: join(remote.root, "state-shadow"),
+      statePath: join(remote.root, "sync-state"),
+      client: agentClient(agent),
+    });
+    coordinator.connect({
+      onFirstSync: (projectId) => {
+        firstSyncs.push(projectId);
+      },
+    });
+    const baseFile = join(remote.root, "sync-state", "demo", "base.json");
+
+    expect(await coordinator.hasCode("demo")).toBe(false);
+    expect(existsSync(baseFile)).toBe(false);
+
+    expect((await coordinator.push("demo", testGrant, "has-code-push-1")).status).toBe("ok");
+    expect(await coordinator.hasCode("demo")).toBe(true);
+    expect(existsSync(baseFile)).toBe(true);
+    expect(firstSyncs).toEqual(["demo"]);
+
+    expect((await coordinator.push("demo", testGrant, "has-code-push-2")).status).toBe("ok");
+    expect(firstSyncs).toEqual(["demo"]);
+
+    await expect(coordinator.hasCode("unknown")).rejects.toBeInstanceOf(SyncCoordinatorError);
   });
 });
