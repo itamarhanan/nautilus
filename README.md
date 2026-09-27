@@ -1,5 +1,6 @@
 # Nautilus
 
+[![CI](https://github.com/itamarhanan/nautilus/actions/workflows/ci.yml/badge.svg)](https://github.com/itamarhanan/nautilus/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](./LICENSE)
 
 **Run a coding agent from your phone. Bring the work home to your PC.**
