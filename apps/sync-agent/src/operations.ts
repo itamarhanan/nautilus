@@ -1,11 +1,14 @@
-import { createHash } from "node:crypto";
-import { rm } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { open, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { loadStateProjects, type AgentConfig, type AgentProject } from "./config";
 import { GrantError } from "./grants";
 import { validateSyncRequest } from "./protocol";
+import { parseResolutions } from "@nautilus/types";
 import {
   LockBusyError,
+  type MergeConflict,
+  type MergePick,
   readJson,
   ShadowGit,
   ShadowGitError,
@@ -18,14 +21,48 @@ import type {
   SyncDiff,
   SyncEvent,
   SyncRequest,
+  SyncResolutions,
   SyncResponse,
   SyncStatus,
+  SyncTransaction,
 } from "@nautilus/types";
 
 const responseVersion = 1 as const;
+const requestLifetimeMs = 5 * 60 * 1000;
 const clockSkewMs = 60 * 1000;
 
 type JsonRecord = Record<string, unknown>;
+
+type Preflight = {
+  id: string;
+  projectId: string;
+  baseHead: string | null;
+  mergeBase: string;
+  localHead: string;
+  remoteHead: string;
+  tree: string;
+
+  resolutions?: SyncResolutions;
+  createdAt: string;
+};
+
+function pullPicks(resolutions: SyncResolutions = {}): Record<string, MergePick> {
+  return Object.fromEntries(
+    Object.entries(resolutions).map(([path, side]): [string, MergePick] => [
+      path,
+      side === "pc" ? "ours" : "theirs",
+    ]),
+  );
+}
+
+function pullConflicts(conflicts: MergeConflict[] = []): SyncConflict[] {
+  return conflicts.map((entry) => ({
+    path: entry.path,
+    reason: entry.reason,
+    pc: entry.ours,
+    runner: entry.theirs,
+  }));
+}
 
 type AgentResponseInput = {
   status: SyncStatus;
@@ -94,7 +131,11 @@ export class SyncAgent {
       : this.config.projects;
   }
 
-  async handle(value: unknown, rawBundle?: Uint8Array): Promise<SyncResponse> {
+  async handle(
+    value: unknown,
+    rawBundle?: Uint8Array,
+    signal?: AbortSignal,
+  ): Promise<SyncResponse> {
     let request: SyncRequest;
     try {
       request = validateSyncRequest(value);
@@ -129,7 +170,7 @@ export class SyncAgent {
           return { ...cached, replayed: true };
         }
         await this.authenticate(request);
-        const result = await this.dispatch(request, project, rawBundle);
+        const result = await this.dispatch(request, project, rawBundle, signal);
         await this.cacheResponse(request, result, project);
         if (result.status !== "ok") await this.recordFailure(request, project, result);
         return result;
@@ -165,6 +206,7 @@ export class SyncAgent {
     request: SyncRequest,
     project: AgentProject,
     rawBundle?: Uint8Array,
+    signal?: AbortSignal,
   ): Promise<SyncResponse> {
     switch (request.operation) {
       case "state":
@@ -175,6 +217,10 @@ export class SyncAgent {
         return this.createBundle(request, project);
       case "import_bundle":
         return this.importBundle(request, project, rawBundle);
+      case "preflight":
+        return this.preflight(request, project);
+      case "apply":
+        return this.apply(request, project, signal);
       case "history":
         return this.history(request, project);
       default:
@@ -296,6 +342,213 @@ export class SyncAgent {
         changes: emptyDiff(),
       },
     });
+  }
+
+  private async preflight(request: SyncRequest, project: AgentProject): Promise<SyncResponse> {
+    const baseHead =
+      request.baseHead === null ? null : this.requiredHead(request.baseHead, "baseHead");
+    const localHead = this.requiredHead(request.expectedLocalHead, "expectedLocalHead");
+    const remoteHead = this.requiredHead(request.expectedRemoteHead, "expectedRemoteHead");
+    const git = await this.git(project);
+    if ((await git.head()) !== localHead)
+      throw new SyncAgentError("stale", "stale_local_head", "Local head changed before preflight");
+    if (!(await git.isClean()))
+      throw new SyncAgentError(
+        "conflict",
+        "local_worktree_dirty",
+        "Local worktree has unexpected changes",
+      );
+    const mergeBase = baseHead ?? (await git.mergeBase());
+    const resolutions = parseResolutions(request.payload.resolutions);
+    const merge = await git.mergeTree(mergeBase, localHead, remoteHead, pullPicks(resolutions));
+    if (!merge.clean || !merge.tree) {
+      return response(request.requestId, {
+        status: "conflict",
+        conflicts: pullConflicts(merge.conflicts),
+      });
+    }
+    const preflight: Preflight = {
+      id: randomUUID(),
+      projectId: project.id,
+      baseHead,
+      mergeBase,
+      localHead,
+      remoteHead,
+      tree: merge.tree,
+      resolutions,
+      createdAt: now(),
+    };
+    await writeJson(
+      join(this.projectDirectory(project, "preflights"), `${preflight.id}.json`),
+      preflight,
+    );
+    return response(request.requestId, {
+      status: "ok",
+      applyToken: preflight.id,
+      diff: await git.diff(baseHead, remoteHead),
+    });
+  }
+
+  private async apply(
+    request: SyncRequest,
+    project: AgentProject,
+    signal?: AbortSignal,
+  ): Promise<SyncResponse> {
+    const abandoned = () => {
+      if (signal?.aborted)
+        throw new SyncAgentError(
+          "failed",
+          "request_timeout",
+          "The runner stopped waiting before the pull was applied",
+        );
+    };
+    const token = this.headValue(request.payload.applyToken);
+    if (!token)
+      throw new SyncAgentError("invalid", "invalid_apply_token", "Apply token is required");
+    const preflightPath = join(this.projectDirectory(project, "preflights"), `${token}.json`);
+    const preflight = await readJson<Preflight | undefined>(preflightPath, undefined);
+    if (
+      !preflight ||
+      preflight.projectId !== project.id ||
+      Date.parse(preflight.createdAt) + requestLifetimeMs < Date.now()
+    ) {
+      throw new SyncAgentError("stale", "expired_apply_token", "Apply token is expired or unknown");
+    }
+    const expectedLocalHead = this.requiredHead(request.expectedLocalHead, "expectedLocalHead");
+    const expectedRemoteHead = this.requiredHead(request.expectedRemoteHead, "expectedRemoteHead");
+    if (request.baseHead !== preflight.baseHead)
+      throw new SyncAgentError("stale", "stale_base_head", "Base head changed before apply");
+    if (expectedLocalHead !== preflight.localHead || expectedRemoteHead !== preflight.remoteHead)
+      throw new SyncAgentError(
+        "stale",
+        "stale_expected_head",
+        "Expected heads changed before apply",
+      );
+    const git = await this.git(project);
+    if ((await git.head()) !== expectedLocalHead)
+      throw new SyncAgentError("stale", "stale_local_head", "Local head changed before apply");
+    if (!(await git.isClean()))
+      throw new SyncAgentError(
+        "conflict",
+        "local_worktree_dirty",
+        "Local worktree changed before apply",
+      );
+    const merge = await git.mergeTree(
+      preflight.mergeBase,
+      preflight.localHead,
+      preflight.remoteHead,
+      pullPicks(preflight.resolutions),
+    );
+    if (!merge.clean || !merge.tree)
+      throw new SyncAgentError(
+        "conflict",
+        "content_conflict",
+        "Merge is no longer clean",
+        pullConflicts(merge.conflicts),
+      );
+    abandoned();
+    await rm(preflightPath, { force: true });
+    const previousBase = await this.base(project);
+    const transaction: SyncTransaction = {
+      requestId: request.requestId,
+      projectId: project.id,
+      direction: "pull",
+      status: "prepared",
+      baseHead: preflight.baseHead,
+      expectedLocalHead: preflight.localHead,
+      expectedRemoteHead: preflight.remoteHead,
+      preflight: preflight.id,
+      recoveryPath: null,
+      previousBaseHead: previousBase,
+      createdAt: now(),
+      updatedAt: now(),
+    };
+    const transactionPath = join(
+      this.projectDirectory(project, "transactions"),
+      `${request.requestId}.json`,
+    );
+    const recoveryPath = join(
+      this.projectDirectory(project, "recovery"),
+      `${request.requestId}.json`,
+    );
+
+    const backupBundle = await git.createBundle(
+      preflight.localHead,
+      join(this.config.backupPath, project.id, "bundles"),
+      null,
+    );
+    const backupPath = join(this.config.backupPath, project.id, `${request.requestId}.bundle`);
+    const backupFile = await open(backupPath, "w", 0o600);
+    try {
+      await backupFile.writeFile(backupBundle.bytes);
+      await backupFile.sync();
+    } finally {
+      await backupFile.close();
+    }
+
+    await rm(join(this.config.backupPath, project.id, "bundles"), {
+      recursive: true,
+      force: true,
+    });
+    await writeJson(recoveryPath, {
+      head: preflight.localHead,
+      baseHead: previousBase,
+      bundlePath: backupPath,
+    });
+    transaction.recoveryPath = recoveryPath;
+
+    abandoned();
+    await writeJson(transactionPath, transaction);
+    try {
+      const mergedHead = await git.applyTree(
+        merge.tree,
+        [preflight.localHead, preflight.remoteHead],
+        "Nautilus pull merge",
+      );
+      await this.setBase(project, preflight.remoteHead);
+      transaction.status = "committed";
+      transaction.resultHead = mergedHead;
+      transaction.updatedAt = now();
+      await writeJson(transactionPath, transaction);
+      await this.appendEvent(project, {
+        requestId: request.requestId,
+        projectId: project.id,
+        direction: "pull",
+        status: "ok",
+        baseHead: preflight.baseHead,
+        localHead: mergedHead,
+        remoteHead: preflight.remoteHead,
+        errorCode: null,
+        conflicts: [],
+        createdAt: transaction.createdAt,
+        committedAt: now(),
+      });
+      const result = response(request.requestId, {
+        status: "ok",
+        state: {
+          projectId: project.id,
+          head: mergedHead,
+          baseHead: preflight.remoteHead,
+          dirty: false,
+          changes: emptyDiff(),
+        },
+      });
+      await this.cacheResponse(request, result, project);
+      return result;
+    } catch (error) {
+      if (transaction.status !== "committed") {
+        await git.restoreHead(preflight.localHead).catch(() => undefined);
+        if (previousBase === null) {
+          await rm(this.stateFile(project), { force: true });
+        } else {
+          await this.setBase(project, previousBase);
+        }
+      }
+      transaction.status = "failed";
+      transaction.updatedAt = now();
+      await writeJson(transactionPath, transaction);
+      throw error;
+    }
   }
 
   private async history(request: SyncRequest, project: AgentProject): Promise<SyncResponse> {
@@ -468,6 +721,16 @@ export class SyncAgent {
 
   private async setBase(project: AgentProject, value: string): Promise<void> {
     await writeJson(this.stateFile(project), value);
+  }
+
+  private requiredHead(value: string | null | undefined, name: string): string {
+    if (!value || !/^[0-9a-f]{40,64}$/.test(value))
+      throw new SyncAgentError("invalid", `invalid_${name}`, `${name} is required`);
+    return value;
+  }
+
+  private headValue(value: unknown): string | null {
+    return typeof value === "string" ? value : null;
   }
 }
 
