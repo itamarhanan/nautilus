@@ -1,7 +1,8 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { loadAgentConfig, type AgentConfig } from "./config";
 import type { GrantAuthority } from "./grants";
-import { SyncAgent } from "./operations";
+import { maxGrantLifetimeMs } from "./grants";
+import { SyncAgent, SyncAgentError } from "./operations";
 
 export { SyncAgent } from "./operations";
 export { GrantAuthority } from "./grants";
@@ -12,6 +13,18 @@ type AgentServer = {
   grants: GrantAuthority;
   close: () => Promise<void>;
 };
+
+const loopbackHosts = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+const desktopOrigins = new Set([
+  "tauri://localhost",
+  "http://tauri.localhost",
+  "https://tauri.localhost",
+  ...(process.env.NAUTILUS_AGENT_ORIGINS ?? "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean),
+]);
 
 async function readBody(request: IncomingMessage, maxBytes: number): Promise<Buffer> {
   const chunks: Uint8Array[] = [];
@@ -81,6 +94,31 @@ function sendSyncResponse(
   response.end(Buffer.from(result.bundle.bytesBase64, "base64"));
 }
 
+function isDesktopRequest(request: IncomingMessage, grants: GrantAuthority): boolean {
+  const host = request.headers.host ?? "";
+  const hostname = host.startsWith("[")
+    ? host.slice(0, host.indexOf("]") + 1)
+    : (host.split(":")[0] ?? "");
+  const origin = request.headers.origin;
+  const authorization = request.headers.authorization ?? "";
+  return (
+    loopbackHosts.has(hostname) &&
+    (origin === undefined || desktopOrigins.has(origin)) &&
+    authorization.startsWith("Bearer ") &&
+    grants.matchesLaunchKey(authorization.slice("Bearer ".length))
+  );
+}
+
+async function readJsonObject(request: IncomingMessage): Promise<Record<string, unknown>> {
+  const body = await readBody(request, 16_384);
+  if (body.length === 0) return {};
+  const value: unknown = JSON.parse(body.toString("utf8"));
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("invalid_request");
+  }
+  return value as Record<string, unknown>;
+}
+
 export async function createSyncAgentServer(
   config: AgentConfig,
   grants: GrantAuthority,
@@ -88,7 +126,7 @@ export async function createSyncAgentServer(
 ): Promise<AgentServer> {
   await agent.recover();
   const server = createServer((request, response) => {
-    void handle(request, response, config, agent);
+    void handle(request, response, config, agent, grants);
   });
   return {
     server,
@@ -109,11 +147,79 @@ export async function createSyncAgentServer(
   };
 }
 
+async function handleDesktop(
+  request: IncomingMessage,
+  response: ServerResponse,
+  pathname: string,
+  agent: SyncAgent,
+  grants: GrantAuthority,
+): Promise<boolean> {
+  const url = new URL(request.url ?? "/", "http://localhost");
+  if (request.method === "POST" && pathname === "/v1/grants") {
+    const body = await readJsonObject(request);
+    const direction = body.direction;
+    if (
+      typeof body.projectId !== "string" ||
+      !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(body.projectId) ||
+      (direction !== "pull" && direction !== "push")
+    ) {
+      sendJson(response, 400, { error: "invalid_request" });
+      return true;
+    }
+    const lifetimeMs =
+      typeof body.ttlSeconds === "number" ? body.ttlSeconds * 1000 : maxGrantLifetimeMs;
+    sendJson(response, 201, grants.mint(body.projectId, direction, lifetimeMs));
+    return true;
+  }
+  if (request.method === "POST" && pathname === "/v1/grants/revoke") {
+    const body = await readJsonObject(request);
+    if (typeof body.grantId !== "string" || body.grantId.length > 128) {
+      sendJson(response, 400, { error: "invalid_request" });
+      return true;
+    }
+    grants.revoke(body.grantId);
+    sendJson(response, 200, { revoked: true });
+    return true;
+  }
+  try {
+    if (request.method === "GET" && pathname === "/v1/status") {
+      sendJson(response, 200, await agent.localStatus(url.searchParams.get("projectId") ?? ""));
+      return true;
+    }
+    if (request.method === "GET" && pathname === "/v1/compare") {
+      const file = await agent.compare(
+        url.searchParams.get("projectId") ?? "",
+        url.searchParams.get("remoteHead") ?? "",
+        url.searchParams.get("path") ?? "",
+      );
+      sendJson(response, 200, file);
+      return true;
+    }
+    if (request.method === "POST" && pathname === "/v1/pull/undo") {
+      const body = await readJsonObject(request);
+      if (typeof body.projectId !== "string" || typeof body.requestId !== "string") {
+        sendJson(response, 400, { error: "invalid_request" });
+        return true;
+      }
+      sendJson(response, 200, await agent.undoPull(body.projectId, body.requestId));
+      return true;
+    }
+  } catch (error) {
+    if (!(error instanceof SyncAgentError)) throw error;
+    const status =
+      error.code === "project_not_configured" ? 404 : error.status === "invalid" ? 400 : 409;
+    sendJson(response, status, { error: error.code, message: error.message });
+    return true;
+  }
+  return false;
+}
+
 async function handle(
   request: IncomingMessage,
   response: ServerResponse,
   config: AgentConfig,
   agent: SyncAgent,
+  grants: GrantAuthority,
 ): Promise<void> {
   try {
     const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
@@ -124,6 +230,19 @@ async function handle(
         service: "nautilus-sync-agent",
       });
       return;
+    }
+    if (
+      pathname === "/v1/grants" ||
+      pathname === "/v1/grants/revoke" ||
+      pathname === "/v1/status" ||
+      pathname === "/v1/compare" ||
+      pathname === "/v1/pull/undo"
+    ) {
+      if (!isDesktopRequest(request, grants)) {
+        sendJson(response, 401, { error: "unauthorized" });
+        return;
+      }
+      if (await handleDesktop(request, response, pathname, agent, grants)) return;
     }
     if (request.method !== "POST" || pathname !== "/v1/sync") {
       sendJson(response, 404, { error: "not_found" });
