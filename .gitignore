@@ -1,0 +1,18 @@
+node_modules/
+.pnpm-store/
+# Next keeps dev and build output apart, so both are covered. Tailwind scans
+# every non-ignored file, so a stray build cache stalls `next dev`.
+.next*/
+dist/
+coverage/
+.env
+.env.*
+*.log
+*.tsbuildinfo
+.lightning_studio/*.local
+scripts/*.local
+.turbo
+target/
+apps/desktop/src-tauri/binaries/
+apps/desktop/src-tauri/gen/
+apps/desktop/src-tauri/resources/
