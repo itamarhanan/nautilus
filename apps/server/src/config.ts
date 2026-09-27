@@ -109,3 +109,141 @@ export async function loadProjects(env: NodeJS.ProcessEnv = process.env): Promis
   }
   return [];
 }
+
+export type ServerOptions = {
+  host: string;
+  port: number;
+
+  gatewayHost: string;
+  gatewayPort: number;
+  previewHost: string;
+
+  webPort: number;
+  sseHeartbeatMs: number;
+  controlOrigins: string[];
+  authSecret: string | undefined;
+  secretsPath: string;
+  controlHost: string;
+  controlPort: number;
+  projectsRoot: string;
+  devPortRange: [number, number];
+  secureCookies: boolean;
+  authSessionSeconds: number;
+  devReadyTimeoutMs: number;
+  previewSecret: string | undefined;
+  previewSessionSeconds: number | undefined;
+  previewOrigin: string | undefined;
+  previewPort: number | undefined;
+  registryPath: string;
+  lifecyclePath: string;
+  projectsFile: string | undefined;
+  openCodeHost: string;
+  openCodePort: number;
+  openCodeDataDir: string;
+  openCodeStartupTimeoutMs: number;
+  syncShadowRoot: string;
+  syncStatePath: string;
+  syncAgentUrl: string;
+  syncMaxFileBytes: number;
+  syncMaxTotalBytes: number;
+  syncMaxFileCount: number;
+  syncRequestTimeoutMs: number;
+};
+
+export function loadServerOptions(env: NodeJS.ProcessEnv = process.env): ServerOptions {
+  const gatewayHost = env.NAUTILUS_GATEWAY_HOST ?? "127.0.0.1";
+  return {
+    host: env.HOST ?? "127.0.0.1",
+    port: Number(env.PORT ?? 4000),
+    gatewayHost,
+    gatewayPort: Number(env.NAUTILUS_GATEWAY_PORT ?? 8080),
+    previewHost: env.NAUTILUS_PREVIEW_HOST ?? gatewayHost,
+    webPort: Number(env.NAUTILUS_WEB_PORT ?? 3000),
+    sseHeartbeatMs: Number(env.NAUTILUS_SSE_HEARTBEAT_MS ?? 25_000),
+    controlOrigins: (env.NAUTILUS_CONTROL_ORIGINS ?? "")
+      .split(",")
+      .map((origin) => origin.trim())
+      .filter(Boolean),
+    authSecret: env.NAUTILUS_AUTH_SECRET,
+    secretsPath: env.NAUTILUS_SECRETS_PATH ?? `${env.HOME ?? "/tmp"}/nautilus/secrets`,
+    controlHost: "127.0.0.1",
+    controlPort: Number(env.NAUTILUS_CONTROL_PORT ?? 4001),
+    projectsRoot: env.NAUTILUS_PROJECTS_ROOT ?? `${env.HOME ?? "/tmp"}/nautilus/projects`,
+    devPortRange: parsePortRange(env.NAUTILUS_DEV_PORT_RANGE ?? "3100-3199"),
+    secureCookies: env.NAUTILUS_SECURE_COOKIES !== "false",
+    authSessionSeconds: Number(env.NAUTILUS_AUTH_SESSION_SECONDS ?? 28_800),
+    devReadyTimeoutMs: Number(env.NAUTILUS_DEV_READY_TIMEOUT_MS ?? 30_000),
+    previewSecret: env.NAUTILUS_PREVIEW_SECRET,
+    previewSessionSeconds: env.NAUTILUS_PREVIEW_SESSION_SECONDS
+      ? Number(env.NAUTILUS_PREVIEW_SESSION_SECONDS)
+      : undefined,
+    previewOrigin: parsePreviewOrigin(env.NAUTILUS_PREVIEW_URL),
+    previewPort: env.NAUTILUS_PREVIEW_PORT ? Number(env.NAUTILUS_PREVIEW_PORT) : undefined,
+    registryPath: env.NAUTILUS_REGISTRY_PATH ?? `${env.HOME ?? "/tmp"}/nautilus/registry.sqlite`,
+    lifecyclePath: env.NAUTILUS_LIFECYCLE_PATH ?? `${env.HOME ?? "/tmp"}/nautilus/journal.jsonl`,
+    projectsFile: env.NAUTILUS_PROJECTS_FILE,
+    openCodeHost: env.NAUTILUS_OPENCODE_HOST ?? "127.0.0.1",
+    openCodePort: Number(env.NAUTILUS_OPENCODE_PORT ?? 4096),
+    openCodeDataDir:
+      env.NAUTILUS_OPENCODE_DATA_DIR ?? `${env.HOME ?? "/tmp"}/nautilus/opencode/state`,
+    openCodeStartupTimeoutMs: Number(env.NAUTILUS_OPENCODE_STARTUP_TIMEOUT_MS ?? 30_000),
+    syncShadowRoot: env.NAUTILUS_SYNC_SHADOW_ROOT ?? `${env.HOME ?? "/tmp"}/nautilus/shadow`,
+    syncStatePath: env.NAUTILUS_SYNC_STATE_PATH ?? `${env.HOME ?? "/tmp"}/nautilus/sync-state`,
+    syncAgentUrl: env.NAUTILUS_SYNC_AGENT_URL ?? "http://127.0.0.1:4200/v1/sync",
+    syncMaxFileBytes: Number(env.NAUTILUS_SYNC_MAX_FILE_BYTES ?? 10_000_000),
+    syncMaxTotalBytes: Number(env.NAUTILUS_SYNC_MAX_TOTAL_BYTES ?? 100_000_000),
+    syncMaxFileCount: Number(env.NAUTILUS_SYNC_MAX_FILE_COUNT ?? 10_000),
+    syncRequestTimeoutMs: Number(env.NAUTILUS_SYNC_REQUEST_TIMEOUT_MS ?? 30_000),
+  };
+}
+
+function parsePreviewOrigin(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new ConfigurationError("NAUTILUS_PREVIEW_URL must be an absolute URL");
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new ConfigurationError("NAUTILUS_PREVIEW_URL must use http or https");
+  }
+  return url.origin;
+}
+
+export function derivePreviewOrigin(
+  host: string | undefined,
+  protocol: string | undefined,
+  previewPort: number,
+): string | undefined {
+  if (!host) return undefined;
+  const scheme = protocol === "https" ? "https" : "http";
+  let url: URL;
+  try {
+    url = new URL(`${scheme}://${host}`);
+  } catch {
+    return undefined;
+  }
+  const portLabel = /^\d{1,5}-(?=[^.]+\.)/.exec(url.hostname);
+  if (portLabel) {
+    url.hostname = `${String(previewPort)}-${url.hostname.slice(portLabel[0].length)}`;
+    return url.origin;
+  }
+  if (url.port) {
+    url.port = String(previewPort);
+    return url.origin;
+  }
+  return undefined;
+}
+
+function parsePortRange(value: string): [number, number] {
+  const match = /^(\d{1,5})-(\d{1,5})$/.exec(value.trim());
+  const low = Number(match?.[1]);
+  const high = Number(match?.[2]);
+  if (!match || low < 1024 || high > 65535 || low > high) {
+    throw new ConfigurationError("NAUTILUS_DEV_PORT_RANGE must look like 3100-3199");
+  }
+  return [low, high];
+}
