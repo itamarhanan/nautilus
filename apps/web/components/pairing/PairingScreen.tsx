@@ -39,10 +39,22 @@ export function PairingScreen() {
       codeRef.current?.focus();
       return;
     }
-    setCode(fromLink.slice(0, 32));
+    const linked = fromLink.slice(0, 32);
+    setCode(linked);
     url.searchParams.delete("pair");
     window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
-  }, []);
+    // Scanning the link already did what typing the code would, so link at
+    // once. A code that has expired or was used leaves the form filled in, with
+    // the reason. The code is out of the address by now, so a second run of
+    // this effect finds nothing to redeem.
+    void (async () => {
+      try {
+        await pair(linked, guessDeviceName());
+      } catch (error) {
+        setFailure(errorMessage(error, "Pairing failed. Try a new code."));
+      }
+    })();
+  }, [pair]);
 
   const submit = async (event: SubmitEvent<HTMLFormElement>) => {
     event.preventDefault();
