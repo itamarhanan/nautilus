@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { open, readdir, rm } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { loadStateProjects, type AgentConfig, type AgentProject } from "./config";
 import { GrantError } from "./grants";
@@ -133,6 +133,56 @@ export class SyncAgent {
     return this.config.statePath
       ? loadStateProjects(this.config.statePath, this.config.home)
       : this.config.projects;
+  }
+
+  async recover(): Promise<void> {
+    await mkdir(this.config.transactionPath, { recursive: true, mode: 0o700 });
+    await mkdir(this.config.backupPath, { recursive: true, mode: 0o700 });
+    for (const project of await this.projects()) {
+      const transactionPath = this.projectDirectory(project, "transactions");
+      for (const entry of await readdir(transactionPath).catch(() => [])) {
+        if (!entry.endsWith(".json")) continue;
+        const path = join(transactionPath, entry);
+        const transaction = await readJson<SyncTransaction | undefined>(path, undefined);
+        if (!transaction || (transaction.status !== "prepared" && transaction.status !== "applied"))
+          continue;
+        const git = await this.git(project);
+        if (transaction.recoveryPath) {
+          const recovery = await readJson<
+            | {
+                head: string;
+                baseHead?: string | null;
+                bundlePath?: string;
+              }
+            | undefined
+          >(transaction.recoveryPath, undefined);
+          if (recovery?.bundlePath) {
+            const bytes = await readFile(recovery.bundlePath);
+            await git.importBundle(
+              {
+                bytes,
+                head: recovery.head,
+                sha256: createHash("sha256").update(bytes).digest("hex"),
+              },
+              null,
+            );
+          }
+          if (recovery?.head) {
+            await git.restoreHead(recovery.head);
+          }
+          if (transaction.previousBaseHead === null) {
+            await rm(this.stateFile(project), { force: true });
+          } else if (transaction.previousBaseHead) {
+            await this.setBase(project, transaction.previousBaseHead);
+          }
+        }
+        transaction.status = "rolled_back";
+        transaction.updatedAt = now();
+        await writeJson(path, transaction);
+      }
+      const nonces = await readJson<string[]>(join(transactionPath, "nonces.json"), []);
+      for (const nonce of nonces) this.usedNonces.add(nonce);
+    }
   }
 
   async handle(
