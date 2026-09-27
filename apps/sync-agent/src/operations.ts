@@ -9,6 +9,7 @@ import {
   LockBusyError,
   type MergeConflict,
   type MergePick,
+  pruneFiles,
   readJson,
   ShadowGit,
   ShadowGitError,
@@ -534,6 +535,7 @@ export class SyncAgent {
         },
       });
       await this.cacheResponse(request, result, project);
+      await this.pruneHistory(project);
       return result;
     } catch (error) {
       if (transaction.status !== "committed") {
@@ -684,6 +686,34 @@ export class SyncAgent {
         throw new SyncAgentError("conflict", "project_busy", error.message);
       throw error;
     }
+  }
+
+  private async pruneHistory(project: AgentProject): Promise<void> {
+    await pruneFiles(join(this.config.backupPath, project.id), {
+      keep: 3,
+      suffix: ".bundle",
+    });
+    await pruneFiles(this.projectDirectory(project, "recovery"), {
+      keep: 3,
+      suffix: ".json",
+    });
+    await pruneFiles(this.projectDirectory(project, "transactions"), {
+      keep: 50,
+      suffix: ".json",
+      protect: async (path) => {
+        if (path.endsWith("nonces.json")) return true;
+        const transaction = await readJson<SyncTransaction | undefined>(path, undefined);
+        return transaction?.status === "prepared" || transaction?.status === "applied";
+      },
+    });
+    await pruneFiles(this.projectDirectory(project, "requests"), {
+      keep: 200,
+      suffix: ".json",
+    });
+    await pruneFiles(this.projectDirectory(project, "preflights"), {
+      keep: 20,
+      suffix: ".json",
+    });
   }
 
   private projectDirectory(project: AgentProject, kind: string): string {
