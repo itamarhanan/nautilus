@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { ControlChannel } from "../src/lib/control";
 import { friendlyError } from "../src/lib/errors";
 import {
   describeFolder,
@@ -40,6 +41,23 @@ const settings: DesktopSettings = {
   },
   projectRoots: ["~/code"],
 };
+
+function firstCall(mock: { mock: { calls: unknown[][] } }): [string, RequestInit | undefined] {
+  const [input, init] = (mock.mock.calls[0] ?? []) as [
+    string | URL | Request | undefined,
+    RequestInit | undefined,
+  ];
+  const url =
+    input instanceof URL ? input.href : input instanceof Request ? input.url : (input ?? "");
+  return [url, init];
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
 
 type FakeChild = {
   program: string;
@@ -404,6 +422,70 @@ describe("ssh forwards", () => {
     expect(friendlyError(new Error("ssh exited: Permission denied (publickey)")).message).toMatch(
       /rejected the SSH key/,
     );
+  });
+});
+
+describe("control channel", () => {
+  it("connects through the SSH forward and reconnects after it drops", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockImplementation(() =>
+          Promise.resolve(jsonResponse({ service: "nautilus-server", version: "1.2.3" })),
+        ),
+    );
+    const timers: Array<() => void> = [];
+    const { spawn, children } = fakeSpawner();
+    const channel = new ControlChannel({
+      spawn,
+      home: "/home/me",
+      localMode: false,
+      setTimer: (callback) => {
+        timers.push(callback);
+        return timers.length;
+      },
+      clearTimer: () => undefined,
+    });
+    const phases: string[] = [];
+    channel.subscribe((snapshot) => phases.push(snapshot.phase));
+    await channel.connect(settings);
+    expect(channel.current.phase).toBe("connected");
+    expect(channel.current.info?.version).toBe("1.2.3");
+    expect(children[0]?.program).toBe("nautilus-ssh-control");
+    const [url, init] = firstCall(vi.mocked(fetch));
+    expect(url).toMatch(/^http:\/\/127\.0\.0\.1:47\d{3}\/api\/control\/info$/);
+    expect(new Headers(init?.headers).get("x-nautilus-control")).toBe("1");
+    expect(new Headers(init?.headers).get("authorization")).toBeNull();
+
+    children[0]?.handlers.onClose(255);
+    expect(channel.current.phase).toBe("reconnecting");
+    expect(timers).toHaveLength(1);
+    timers[0]?.();
+    await vi.waitFor(() => {
+      expect(channel.current.phase).toBe("connected");
+    });
+    expect(children).toHaveLength(2);
+    await channel.disconnect();
+    expect(phases).toContain("connecting");
+  });
+
+  it("fails without retrying when validating new settings", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("connection refused")));
+    const { spawn } = fakeSpawner((child) => {
+      child.handlers.onStderr?.("ssh: Could not resolve hostname ssh.lightning.ai");
+      child.handlers.onClose(255);
+    });
+    const channel = new ControlChannel({
+      spawn,
+      home: "/home/me",
+      localMode: false,
+      setTimer: () => 0,
+    });
+    await expect(channel.connect(settings, { retry: false })).rejects.toThrow(
+      /could not be resolved/,
+    );
+    expect(channel.current.phase).toBe("offline");
   });
 });
 
