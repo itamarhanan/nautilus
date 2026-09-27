@@ -739,6 +739,93 @@ describe("sync agent", () => {
     expect(await readFile(join(localProject.workTree, "README.md"), "utf8")).toBe("remote\n");
   });
 
+  describe("mergeTree", () => {
+    const lines = (...values: string[]) => values.map((value) => `${value}\n`).join("");
+
+    async function sides(
+      base: Record<string, string>,
+      ours: Record<string, string | null>,
+      theirs: Record<string, string | null>,
+    ) {
+      const project = await temporaryProject();
+      const git = new ShadowGit({
+        gitDir: project.shadowPath,
+        workTree: project.workTree,
+      });
+      const write = async (files: Record<string, string | null>) => {
+        for (const [path, content] of Object.entries(files)) {
+          if (content === null) await rm(join(project.workTree, path), { force: true });
+          else await writeFile(join(project.workTree, path), content);
+        }
+      };
+      await write(base);
+      const baseHead = await git.snapshot("base");
+      await write(ours);
+      const oursHead = await git.snapshot("ours");
+      await git.restoreHead(baseHead);
+      await write(theirs);
+      const theirsHead = await git.snapshot("theirs");
+      const read = async (tree: string, path: string) =>
+        (await execFileAsync("git", ["--git-dir", project.shadowPath, "show", `${tree}:${path}`]))
+          .stdout;
+      return { git, baseHead, oursHead, theirsHead, read };
+    }
+
+    test("keeps a deletion when the other side left the file alone", async () => {
+      const { git, baseHead, oursHead, theirsHead } = await sides(
+        { "a.ts": "a\n", "b.ts": "b\n" },
+        { "a.ts": null },
+        { "b.ts": "changed\n" },
+      );
+      const merge = await git.mergeTree(baseHead, oursHead, theirsHead);
+      expect(merge.clean).toBe(true);
+    });
+
+    test("merges edits to different lines of the same file", async () => {
+      const { git, baseHead, oursHead, theirsHead, read } = await sides(
+        { "a.ts": lines("1", "2", "3", "4", "5", "6", "7", "8") },
+        { "a.ts": lines("one", "2", "3", "4", "5", "6", "7", "8") },
+        { "a.ts": lines("1", "2", "3", "4", "5", "6", "7", "eight") },
+      );
+      const merge = await git.mergeTree(baseHead, oursHead, theirsHead);
+      expect(merge.clean).toBe(true);
+      expect(await read(merge.tree as string, "a.ts")).toBe(
+        lines("one", "2", "3", "4", "5", "6", "7", "eight"),
+      );
+    });
+
+    test("reports overlapping edits and edits against deletions, then takes the picked side", async () => {
+      const { git, baseHead, oursHead, theirsHead, read } = await sides(
+        { "a.ts": "base\n", "b.ts": "b\n" },
+        { "a.ts": "ours\n", "b.ts": null },
+        { "a.ts": "theirs\n", "b.ts": "edited\n" },
+      );
+      const merge = await git.mergeTree(baseHead, oursHead, theirsHead);
+      expect(merge.clean).toBe(false);
+      expect(merge.conflicts).toEqual([
+        {
+          path: "a.ts",
+          reason: "content_conflict",
+          ours: "modified",
+          theirs: "modified",
+        },
+        {
+          path: "b.ts",
+          reason: "delete_conflict",
+          ours: "deleted",
+          theirs: "modified",
+        },
+      ]);
+      const picked = await git.mergeTree(baseHead, oursHead, theirsHead, {
+        "a.ts": "theirs",
+        "b.ts": "ours",
+      });
+      expect(picked.clean).toBe(true);
+      expect(await read(picked.tree as string, "a.ts")).toBe("theirs\n");
+      await expect(read(picked.tree as string, "b.ts")).rejects.toThrow();
+    });
+  });
+
   test("accepts only grants minted by this PC for the project and direction", async () => {
     const project = await temporaryProject();
     await writeFile(join(project.workTree, "README.md"), "hello\n");
