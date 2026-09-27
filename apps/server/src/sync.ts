@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type {
   ProjectConfig,
   SyncBundle,
+  SyncDiff,
   SyncEvent,
   SyncRequest,
   SyncResponse,
@@ -673,6 +674,77 @@ export class SyncCoordinator {
       createdAt: now,
       updatedAt: now,
     };
+  }
+
+  async checkpoint(projectId: string, sessionId: string): Promise<Checkpoint> {
+    const git = await this.git(this.project(projectId));
+    return this.commitWorktree(projectId, git, sessionId, `Nautilus agent checkpoint ${sessionId}`);
+  }
+
+  async changes(projectId: string, from: string | null, to: string): Promise<SyncDiff> {
+    const git = await this.git(this.project(projectId));
+    await this.requireCheckpoints(git, from, to);
+    if (from === to) return { files: [], additions: 0, deletions: 0 };
+    return git.diff(from, to);
+  }
+
+  async revert(
+    projectId: string,
+    commit: string,
+    previousHead: string | null,
+    sessionId: string,
+  ): Promise<RevertResult> {
+    return this.withLock(projectId, async () => {
+      const git = await this.git(this.project(projectId));
+      if (previousHead === null)
+        throw new SyncCoordinatorError(
+          "invalid",
+          "nothing_to_revert",
+          "This turn has no earlier state",
+        );
+      await this.requireCheckpoints(git, previousHead, commit);
+
+      await this.adoptWorktree(projectId, git);
+      const head = (await git.head()) ?? commit;
+      const merge = await git.mergeTree(commit, head, previousHead);
+      if (!merge.clean || !merge.tree) {
+        return {
+          status: "conflict",
+          conflicts: (merge.conflicts ?? []).map((conflict) => conflict.path),
+        };
+      }
+      if (!(await git.isClean()))
+        throw new SyncCoordinatorError(
+          "conflict",
+          "remote_worktree_dirty",
+          "The runner's files changed during the revert; try again",
+        );
+      const intentPath = this.pendingCheckpointPath(projectId);
+      await writeJson(intentPath, {
+        sessionId,
+        previousHead: head,
+        createdAt: new Date().toISOString(),
+      });
+      const reverted = await git.applyTree(merge.tree, [head], `Nautilus revert of ${commit}`);
+      await this.recordCheckpoint(projectId, reverted);
+      await rm(intentPath, { force: true });
+      return {
+        status: "ok",
+        checkpoint: { commit: reverted, previousHead: head },
+      };
+    });
+  }
+
+  private async requireCheckpoints(git: ShadowGit, from: string | null, to: string): Promise<void> {
+    const head = await git.head();
+    const known = async (commit: string): Promise<boolean> =>
+      commitPattern.test(commit) && head !== null ? git.isAncestor(commit, head) : false;
+    if (!(await known(to)) || (from !== null && !(await known(from))))
+      throw new SyncCoordinatorError(
+        "invalid",
+        "checkpoint_not_found",
+        "That checkpoint is not in this project's history",
+      );
   }
 
   private async adoptWorktree(projectId: string, git: ShadowGit): Promise<void> {
