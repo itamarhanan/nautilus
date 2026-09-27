@@ -36,6 +36,7 @@ import {
 } from "../src/lib/state";
 import { editablePath } from "../src/lib/editor";
 import { SyncSession } from "../src/lib/sync";
+import { createDesktopStore, type DesktopServices } from "../src/store";
 
 const settings: DesktopSettings = {
   runnerUrl: "https://8080-studio.cloudspaces.litng.ai",
@@ -704,6 +705,410 @@ describe("sync session", () => {
     await expect(broken.preview()).rejects.toThrow("boom");
     await broken.close();
     expect(failingMocks.revokeGrant).toHaveBeenCalledWith("grant-1");
+  });
+});
+
+describe("desktop store", () => {
+  function services(overrides: Partial<DesktopServices> = {}) {
+    let savedState: unknown;
+    const control = {
+      projects: vi.fn().mockResolvedValue([]),
+      devices: vi.fn().mockResolvedValue([]),
+      registerProject: vi
+        .fn()
+        .mockImplementation((project: { projectId: string; name: string; devCommand: string }) =>
+          Promise.resolve({
+            id: project.projectId,
+            name: project.name,
+            devCommand: project.devCommand,
+            state: "inactive",
+          }),
+        ),
+      syncStatus: vi.fn().mockResolvedValue({
+        projectId: "shop",
+        neverSynced: true,
+        changedFiles: 0,
+        changedPaths: [],
+      }),
+      syncHistory: vi.fn().mockResolvedValue([]),
+      rewindSyncBase: vi.fn().mockResolvedValue(undefined),
+      syncPreview: vi.fn(),
+      sync: vi.fn(),
+      pairingCode: vi.fn().mockResolvedValue({
+        id: "p",
+        code: "ABCD2345",
+        expiresAt: new Date(Date.now() + 300_000).toISOString(),
+      }),
+    };
+    const channel = {
+      current: {
+        phase: "connected",
+        error: null,
+        info: null,
+        api: control,
+        retryAt: null,
+      },
+      subscribe: vi.fn((listener: (snapshot: unknown) => void) => {
+        listener({
+          phase: "connected",
+          error: null,
+          info: null,
+          api: control,
+          retryAt: null,
+        });
+        return () => undefined;
+      }),
+      connect: vi.fn().mockResolvedValue(undefined),
+      reconnect: vi.fn(),
+    };
+    const saveSettingsMock = vi.fn().mockResolvedValue(undefined);
+    const agentClient = {
+      status: vi.fn().mockResolvedValue({
+        projectId: "shop",
+        neverSynced: true,
+        changedFiles: 0,
+        changedPaths: [],
+      }),
+      mintGrant: vi.fn().mockResolvedValue({
+        grant: "payload.sig",
+        claims: { grantId: "grant-1" },
+      }),
+      revokeGrant: vi.fn().mockResolvedValue(undefined),
+      undoPull: vi.fn().mockResolvedValue({
+        projectId: "shop",
+        neverSynced: false,
+        changedFiles: 0,
+        changedPaths: [],
+        undoablePull: null,
+      }),
+    };
+    const agent = {
+      subscribe: vi.fn(() => () => undefined),
+      start: vi.fn().mockResolvedValue(agentClient),
+      client: agentClient,
+    };
+    const value: DesktopServices = {
+      paths: () =>
+        Promise.resolve({
+          home: "/home/me",
+          config: "c",
+          state: "s",
+          sshConfig: "k",
+        }),
+      loadSettings: () => Promise.resolve({ settings, exists: true }),
+      saveSettings: saveSettingsMock,
+      loadState: () => Promise.resolve(emptyState),
+      saveState: vi.fn((_paths, state) => {
+        savedState = state;
+        return Promise.resolve();
+      }),
+      folderIo: {
+        listDir: () => Promise.resolve([]),
+        readText: () => Promise.resolve(""),
+      },
+      spawn: fakeSpawner().spawn,
+      channel: channel as unknown as ControlChannel,
+      agent: () => Promise.resolve(agent as unknown as AgentProcess),
+      localMode: true,
+      openFile: vi.fn().mockResolvedValue(undefined),
+      ...overrides,
+    };
+    return {
+      value,
+      control,
+      channel,
+      agentClient,
+      saveSettingsMock,
+      savedState: () => savedState,
+    };
+  }
+
+  it("adds a project on the runner and in state.json with its dev command", async () => {
+    const { value, control, savedState } = services();
+    const store = createDesktopStore(value);
+    await store.getState().init();
+    await store.getState().addProject({
+      folder: {
+        name: "Shop",
+        path: "~/code/shop",
+        git: true,
+        packageManager: "pnpm",
+        devScript: "dev",
+      },
+      name: "Shop",
+      devCommand: "pnpm dev",
+    });
+    expect(control.registerProject).toHaveBeenCalledWith({
+      projectId: "shop",
+      name: "Shop",
+      devCommand: "pnpm dev",
+    });
+    expect(savedState()).toMatchObject({
+      projects: [
+        {
+          id: "shop",
+          name: "Shop",
+          localPath: "~/code/shop",
+          devCommand: "pnpm dev",
+        },
+      ],
+      recentFolders: [{ path: "~/code/shop" }],
+      lastProjectId: "shop",
+    });
+    expect(store.getState().selectedProjectId).toBe("shop");
+  });
+
+  const twoProjects = {
+    ...emptyState,
+    lastProjectId: "blog",
+    projects: ["shop", "blog"].map((id) => ({
+      id,
+      name: id,
+      localPath: `/home/me/code/${id}`,
+      devCommand: "pnpm dev",
+      addedAt: "2026-01-01T00:00:00.000Z",
+      acknowledgedExclusions: [],
+    })),
+  };
+
+  it("undoes a pull on the runner before the PC, and refreshes afterwards", async () => {
+    const { value, control, agentClient } = services({
+      loadState: () => Promise.resolve(twoProjects),
+    });
+    control.projects.mockResolvedValue([{ id: "shop", name: "shop", state: "idle" }]);
+    const pull = {
+      requestId: "pull-1-apply",
+      pulledAt: "2026-09-26T10:00:00.000Z",
+      localHead: "a".repeat(40),
+      remoteHead: "c".repeat(40),
+      previousBaseHead: "b".repeat(40),
+    };
+    agentClient.status.mockResolvedValue({
+      projectId: "shop",
+      neverSynced: false,
+      baseHead: pull.remoteHead,
+      changedFiles: 0,
+      changedPaths: [],
+      undoablePull: pull,
+    });
+    const store = createDesktopStore(value);
+    await store.getState().init();
+    await store.getState().refreshStatus("shop");
+    await store.getState().undoPull("shop");
+    expect(control.rewindSyncBase).toHaveBeenCalledWith(
+      "shop",
+      pull.remoteHead,
+      pull.previousBaseHead,
+    );
+    expect(agentClient.undoPull).toHaveBeenCalledWith("shop", "pull-1-apply");
+    expect(control.rewindSyncBase.mock.invocationCallOrder[0]).toBeLessThan(
+      agentClient.undoPull.mock.invocationCallOrder[0] ?? 0,
+    );
+    expect(store.getState().undoingPull).toBeNull();
+    expect(store.getState().notices.at(-1)).toMatchObject({
+      tone: "success",
+      title: "Pull undone",
+    });
+  });
+
+  it("leaves the PC alone when the runner refuses to rewind", async () => {
+    const { value, control, agentClient } = services({
+      loadState: () => Promise.resolve(twoProjects),
+    });
+    control.projects.mockResolvedValue([{ id: "shop", name: "shop", state: "idle" }]);
+    control.rewindSyncBase.mockRejectedValue(
+      new Error("The runner has synchronized since this pull"),
+    );
+    agentClient.status.mockResolvedValue({
+      projectId: "shop",
+      neverSynced: false,
+      baseHead: "c".repeat(40),
+      changedFiles: 0,
+      changedPaths: [],
+      undoablePull: {
+        requestId: "pull-1-apply",
+        pulledAt: "2026-09-26T10:00:00.000Z",
+        localHead: "a".repeat(40),
+        remoteHead: "c".repeat(40),
+        previousBaseHead: "b".repeat(40),
+      },
+    });
+    const store = createDesktopStore(value);
+    await store.getState().init();
+    await store.getState().refreshStatus("shop");
+    await store.getState().undoPull("shop");
+    expect(agentClient.undoPull).not.toHaveBeenCalled();
+    expect(store.getState().notices.at(-1)).toMatchObject({
+      tone: "error",
+      title: "Could not undo the pull",
+    });
+  });
+
+  it("announces new runner work once, and stays quiet on the first look and when nothing moved", async () => {
+    const alert = vi.fn();
+    const { value, control } = services({
+      loadState: () => Promise.resolve(twoProjects),
+      alert,
+    });
+    control.projects.mockResolvedValue([{ id: "shop", name: "shop", state: "idle" }]);
+    const status = (head: string, changedFiles: number) => ({
+      projectId: "shop",
+      neverSynced: false,
+      head,
+      baseHead: "b".repeat(40),
+      changedFiles,
+      changedPaths: [],
+      excludedRepositories: [],
+    });
+    control.syncStatus.mockResolvedValue(status("1".repeat(40), 2));
+    const store = createDesktopStore(value);
+    await store.getState().init();
+
+    await store.getState().refreshRunner();
+    await store.getState().refreshStatus("shop");
+    expect(alert).not.toHaveBeenCalled();
+
+    control.syncStatus.mockResolvedValue(status("2".repeat(40), 3));
+    await store.getState().refreshStatus("shop");
+    expect(alert).toHaveBeenCalledOnce();
+    expect(alert).toHaveBeenCalledWith(
+      "New changes in shop",
+      "3 files ready to pull from the runner.",
+    );
+  });
+
+  it("opens on home, walks into a project, and goes back up one level at a time", async () => {
+    const { value } = services({
+      loadState: () => Promise.resolve(twoProjects),
+    });
+    const store = createDesktopStore(value);
+    await store.getState().init();
+    expect(store.getState().route).toEqual({ name: "home" });
+    expect(store.getState().selectedProjectId).toBe("blog");
+
+    store.getState().selectProject("shop", "settings");
+    expect(store.getState().route).toEqual({
+      name: "project",
+      tab: "settings",
+    });
+    expect(store.getState().selectedProjectId).toBe("shop");
+
+    store.getState().navigate({ name: "settings", section: "runner" });
+    store.getState().navigate({ name: "settings", section: "phones" });
+    store.getState().goUp();
+    expect(store.getState().route).toEqual({
+      name: "project",
+      tab: "settings",
+    });
+
+    store.getState().goUp();
+    expect(store.getState().route).toEqual({
+      name: "project",
+      tab: "overview",
+    });
+    store.getState().goUp();
+    expect(store.getState().route).toEqual({ name: "home" });
+  });
+
+  it("opens settings first until the runner is configured", async () => {
+    const { value } = services({
+      loadSettings: () =>
+        Promise.resolve({
+          settings: { ...settings, runnerUrl: "" },
+          exists: false,
+        }),
+      localMode: false,
+    });
+    const store = createDesktopStore(value);
+    await store.getState().init();
+    expect(store.getState().route).toEqual({
+      name: "settings",
+      section: "runner",
+    });
+  });
+
+  it("loads every project's history for home and returns home after a removal", async () => {
+    const { value, control } = services({
+      loadState: () => Promise.resolve(twoProjects),
+    });
+    control.projects.mockResolvedValue(
+      twoProjects.projects.map((project) => ({
+        id: project.id,
+        name: project.name,
+        state: "inactive",
+      })),
+    );
+    Object.assign(control, {
+      deleteProject: vi.fn().mockResolvedValue(undefined),
+    });
+    const store = createDesktopStore(value);
+    await store.getState().init();
+    await store.getState().refreshRunner();
+    expect(control.syncHistory).toHaveBeenCalledWith("shop");
+    expect(control.syncHistory).toHaveBeenCalledWith("blog");
+
+    store.getState().selectProject("shop", "settings");
+    await store.getState().removeProject("shop");
+    expect(store.getState().route).toEqual({ name: "home" });
+    expect(store.getState().selectedProjectId).toBe("blog");
+  });
+
+  it("saves a project edit to state.json only once the runner accepts it", async () => {
+    const { value, control, savedState } = services({
+      loadState: () => Promise.resolve(twoProjects),
+    });
+    const updateProject = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("Project devCommand cannot contain shell operators"))
+      .mockImplementation((id: string, changes: { name: string; devCommand: string }) =>
+        Promise.resolve({ id, ...changes, state: "inactive" }),
+      );
+    Object.assign(control, { updateProject });
+    const store = createDesktopStore(value);
+    await store.getState().init();
+
+    expect(
+      await store.getState().updateProject("shop", { name: "Shop", devCommand: "a && b" }),
+    ).toMatch(/shell operators/);
+    expect(store.getState().appState.projects[0]).toMatchObject({
+      name: "shop",
+    });
+
+    expect(
+      await store.getState().updateProject("shop", { name: " Shop ", devCommand: "npm start" }),
+    ).toBeNull();
+    expect(updateProject).toHaveBeenLastCalledWith("shop", {
+      name: "Shop",
+      devCommand: "npm start",
+    });
+    expect(savedState()).toMatchObject({
+      projects: [{ id: "shop", name: "Shop", devCommand: "npm start" }, { id: "blog" }],
+    });
+  });
+
+  it("creates a phone link without any project", async () => {
+    const { value } = services();
+    const store = createDesktopStore(value);
+    await store.getState().init();
+    store.getState().setLinkPhoneOpen(true);
+    await vi.waitFor(() => {
+      expect(store.getState().pairing?.code).toBe("ABCD2345");
+    });
+    expect(store.getState().pairing?.url).toBe("http://127.0.0.1:3000/?pair=ABCD2345");
+  });
+
+  it("does not save settings that fail to connect", async () => {
+    const { value, channel, saveSettingsMock } = services();
+    const store = createDesktopStore(value);
+    await store.getState().init();
+    channel.connect.mockRejectedValueOnce(new Error("Permission denied"));
+    const next = { ...settings, ssh: { ...settings.ssh, user: "s_other" } };
+    expect(await store.getState().saveSettings(next)).toBe("connection_failed");
+    expect(saveSettingsMock).not.toHaveBeenCalled();
+    const invalid = await store.getState().saveSettings({ ...next, projectRoots: ["relative"] });
+    expect(
+      typeof invalid === "object" && invalid !== null ? invalid.projectRoots : undefined,
+    ).toMatch(/absolute/);
   });
 });
 
