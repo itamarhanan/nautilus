@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { open, rm } from "node:fs/promises";
+import { open, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { loadStateProjects, type AgentConfig, type AgentProject } from "./config";
 import { GrantError } from "./grants";
@@ -17,15 +17,18 @@ import {
   writeJson,
 } from "@nautilus/shadow-git";
 import type {
+  LocalSyncStatusResponse,
   SyncBundle,
   SyncConflict,
   SyncDiff,
   SyncEvent,
+  SyncFileChange,
   SyncRequest,
   SyncResolutions,
   SyncResponse,
   SyncStatus,
   SyncTransaction,
+  UndoablePull,
 } from "@nautilus/types";
 
 const responseVersion = 1 as const;
@@ -686,6 +689,110 @@ export class SyncAgent {
         throw new SyncAgentError("conflict", "project_busy", error.message);
       throw error;
     }
+  }
+
+  private async configuredProject(projectId: string): Promise<AgentProject> {
+    const project = (await this.projects()).find((entry) => entry.id === projectId);
+    if (!project)
+      throw new SyncAgentError("invalid", "project_not_configured", "Project is not configured");
+    return project;
+  }
+
+  async localStatus(projectId: string): Promise<LocalSyncStatusResponse> {
+    const project = await this.configuredProject(projectId);
+    const baseHead = await this.base(project);
+    const git = await this.git(project);
+    const changedPaths = baseHead === null ? [] : await git.changedPaths(baseHead);
+    const undoable = await this.undoablePull(project, git);
+    return {
+      projectId,
+      neverSynced: baseHead === null,
+      baseHead,
+      changedFiles: changedPaths.length,
+      changedPaths: changedPaths.slice(0, 50),
+      undoablePull: undoable?.pull ?? null,
+    };
+  }
+
+  async compare(projectId: string, remoteHead: string, path: string): Promise<SyncFileChange> {
+    const project = await this.configuredProject(projectId);
+    const head = this.requiredHead(remoteHead, "remoteHead");
+    try {
+      return await (await this.git(project)).compareWorktreeFile(head, path);
+    } catch (error) {
+      if (error instanceof ShadowGitError)
+        throw new SyncAgentError("invalid", error.code, error.message);
+      throw error;
+    }
+  }
+
+  private async undoablePull(
+    project: AgentProject,
+    git: ShadowGit,
+  ): Promise<{
+    pull: UndoablePull;
+    transaction: SyncTransaction;
+    path: string;
+  } | null> {
+    const directory = this.projectDirectory(project, "transactions");
+    let latest: { transaction: SyncTransaction; path: string } | null = null;
+    for (const entry of await readdir(directory).catch(() => [])) {
+      if (!entry.endsWith(".json") || entry === "nonces.json") continue;
+      const path = join(directory, entry);
+      const transaction = await readJson<SyncTransaction | undefined>(path, undefined);
+      if (transaction?.status !== "committed") continue;
+      if (!latest || transaction.updatedAt > latest.transaction.updatedAt)
+        latest = { transaction, path };
+    }
+    const transaction = latest?.transaction;
+    if (
+      !latest ||
+      !transaction ||
+      transaction.direction !== "pull" ||
+      transaction.undoneAt ||
+      !transaction.resultHead ||
+      !transaction.expectedLocalHead ||
+      !transaction.expectedRemoteHead ||
+      !transaction.previousBaseHead
+    )
+      return null;
+    if ((await this.base(project)) !== transaction.expectedRemoteHead) return null;
+    if ((await git.head()) !== transaction.resultHead) return null;
+    if (!(await git.isClean())) return null;
+    return {
+      ...latest,
+      pull: {
+        requestId: transaction.requestId,
+        pulledAt: transaction.updatedAt,
+        localHead: transaction.expectedLocalHead,
+        remoteHead: transaction.expectedRemoteHead,
+        previousBaseHead: transaction.previousBaseHead,
+      },
+    };
+  }
+
+  async undoPull(projectId: string, requestId: string): Promise<LocalSyncStatusResponse> {
+    const project = await this.configuredProject(projectId);
+    await this.withLock(project, async () => {
+      const git = await this.git(project);
+      const undoable = await this.undoablePull(project, git);
+      if (undoable?.transaction.requestId !== requestId)
+        throw new SyncAgentError(
+          "stale",
+          "pull_not_undoable",
+          "This pull can no longer be undone: something changed since",
+        );
+      const { pull, transaction, path } = undoable;
+      await git.restoreHead(pull.localHead);
+      await this.setBase(project, pull.previousBaseHead);
+      transaction.undoneAt = now();
+      await writeJson(path, transaction);
+      const event = (await this.readEvents(project)).find(
+        (entry) => entry.requestId === transaction.requestId,
+      );
+      if (event) await this.appendEvent(project, { ...event, undone: true });
+    });
+    return this.localStatus(projectId);
   }
 
   private async pruneHistory(project: AgentProject): Promise<void> {
