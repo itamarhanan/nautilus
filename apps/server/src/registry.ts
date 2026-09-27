@@ -1,7 +1,17 @@
+import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { ProjectConfig, ProjectRecord, ProjectState } from "@nautilus/types";
+import type {
+  ModelRef,
+  ProjectConfig,
+  ProjectRecord,
+  ProjectState,
+  SessionEvent,
+  SessionEventType,
+  SessionRecord,
+  SessionStatus,
+} from "@nautilus/types";
 
 type ProjectRow = {
   id: string;
@@ -17,12 +27,49 @@ type ProjectRow = {
   updatedAt: string;
 };
 
+type SessionRow = {
+  id: string;
+  projectId: string;
+  openCodeSessionId: string;
+  title: string;
+  status: SessionStatus;
+  lastSequence: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type SessionEventRow = {
+  sessionId: string;
+  projectId: string;
+  sequence: number;
+  timestamp: string;
+  type: SessionEventType;
+  durable: number;
+  payload: string;
+};
+
 function now(): string {
   return new Date().toISOString();
 }
 
 function mapProject(row: ProjectRow): ProjectRecord {
   return row;
+}
+
+function mapSession(row: SessionRow): SessionRecord {
+  return row;
+}
+
+function mapSessionEvent(row: SessionEventRow): SessionEvent {
+  return {
+    sessionId: row.sessionId,
+    projectId: row.projectId,
+    sequence: row.sequence,
+    timestamp: row.timestamp,
+    type: row.type,
+    durable: row.durable === 1,
+    payload: JSON.parse(row.payload) as Record<string, unknown>,
+  };
 }
 
 export class Registry {
@@ -355,4 +402,194 @@ export class Registry {
   deleteProject(id: string): void {
     this.db.prepare("DELETE FROM projects WHERE id = ?").run(id);
   }
+
+  createAgentSession(projectId: string, openCodeSessionId: string, title: string): SessionRecord {
+    const timestamp = now();
+    const id = randomUUID();
+    this.db
+      .prepare(
+        `
+        INSERT INTO agent_sessions
+          (id, project_id, opencode_session_id, title, status, last_sequence, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'idle', 0, ?, ?)
+      `,
+      )
+      .run(id, projectId, openCodeSessionId, title, timestamp, timestamp);
+    this.appendAgentSessionEvent(id, "session.started", { openCodeSessionId }, true);
+    return this.getAgentSession(id) as SessionRecord;
+  }
+
+  getAgentSession(id: string): SessionRecord | undefined {
+    const row = this.db
+      .prepare(
+        `
+        SELECT id, project_id AS projectId, opencode_session_id AS openCodeSessionId,
+          title, status, last_sequence AS lastSequence, created_at AS createdAt, updated_at AS updatedAt
+        FROM agent_sessions WHERE id = ?
+      `,
+      )
+      .get(id) as SessionRow | undefined;
+    return row ? mapSession(row) : undefined;
+  }
+
+  getAgentSessionByOpenCodeId(openCodeSessionId: string): SessionRecord | undefined {
+    const row = this.db
+      .prepare(
+        `
+        SELECT id, project_id AS projectId, opencode_session_id AS openCodeSessionId,
+          title, status, last_sequence AS lastSequence, created_at AS createdAt, updated_at AS updatedAt
+        FROM agent_sessions WHERE opencode_session_id = ?
+      `,
+      )
+      .get(openCodeSessionId) as SessionRow | undefined;
+    return row ? mapSession(row) : undefined;
+  }
+
+  listAgentSessions(projectId?: string): SessionRecord[] {
+    const rows = this.db
+      .prepare(
+        `
+        SELECT id, project_id AS projectId, opencode_session_id AS openCodeSessionId,
+          title, status, last_sequence AS lastSequence, created_at AS createdAt, updated_at AS updatedAt
+        FROM agent_sessions
+        WHERE (? IS NULL OR project_id = ?)
+        ORDER BY created_at DESC
+      `,
+      )
+      .all(projectId ?? null, projectId ?? null) as SessionRow[];
+    return rows.map(mapSession);
+  }
+
+  appendAgentSessionEvent(
+    sessionId: string,
+    type: SessionEventType,
+    payload: Record<string, unknown>,
+    durable = true,
+  ): SessionEvent {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const session = this.db
+        .prepare(
+          "SELECT project_id AS projectId, last_sequence AS lastSequence FROM agent_sessions WHERE id = ?",
+        )
+        .get(sessionId) as { projectId: string; lastSequence: number } | undefined;
+      if (!session) {
+        throw new Error("agent_session_not_found");
+      }
+      const sequence = session.lastSequence + 1;
+      const timestamp = now();
+      this.db
+        .prepare(
+          `
+          INSERT INTO agent_session_events
+            (session_id, sequence, project_id, timestamp, type, durable, payload)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `,
+        )
+        .run(
+          sessionId,
+          sequence,
+          session.projectId,
+          timestamp,
+          type,
+          durable ? 1 : 0,
+          JSON.stringify(payload),
+        );
+      this.db
+        .prepare("UPDATE agent_sessions SET last_sequence = ?, updated_at = ? WHERE id = ?")
+        .run(sequence, timestamp, sessionId);
+      this.db.exec("COMMIT");
+      return {
+        sessionId,
+        projectId: session.projectId,
+        sequence,
+        timestamp,
+        type,
+        durable,
+        payload,
+      };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  renameAgentSession(id: string, title: string): void {
+    this.db
+      .prepare("UPDATE agent_sessions SET title = ?, updated_at = ? WHERE id = ?")
+      .run(title, now(), id);
+  }
+
+  hasUserPrompt(id: string): boolean {
+    return (
+      this.db
+        .prepare(
+          `
+          SELECT 1 FROM agent_session_events
+          WHERE session_id = ? AND type = 'session.message'
+            AND json_extract(payload, '$.message.role') = 'user'
+          LIMIT 1
+        `,
+        )
+        .get(id) !== undefined
+    );
+  }
+
+  setAgentSessionStatus(id: string, status: SessionStatus, lastSequence?: number): void {
+    const timestamp = now();
+    this.db
+      .prepare(
+        `
+        UPDATE agent_sessions
+        SET status = ?, updated_at = ?,
+          last_sequence = CASE WHEN ? IS NULL THEN last_sequence ELSE ? END
+        WHERE id = ?
+      `,
+      )
+      .run(status, timestamp, lastSequence ?? null, lastSequence ?? null, id);
+  }
+
+  listAgentSessionEvents(sessionId: string, afterSequence = 0): SessionEvent[] {
+    const rows = this.db
+      .prepare(
+        `
+        SELECT session_id AS sessionId, project_id AS projectId, sequence, timestamp,
+          type, durable, payload
+        FROM agent_session_events
+        WHERE session_id = ? AND sequence > ?
+        ORDER BY sequence ASC
+      `,
+      )
+      .all(sessionId, afterSequence) as SessionEventRow[];
+    return rows.map(mapSessionEvent);
+  }
+
+  listDurableAgentSessionEvents(sessionId: string, afterSequence = 0): SessionEvent[] {
+    return this.listAgentSessionEvents(sessionId, afterSequence).filter((event) => event.durable);
+  }
+
+  getLastDurableUserPrompt(sessionId: string): { text: string; model?: ModelRef } | undefined {
+    const events = this.listDurableAgentSessionEvents(sessionId);
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index];
+      if (event?.type !== "session.message") {
+        continue;
+      }
+      const message = event.payload.message;
+      if (typeof message !== "object" || message === null) {
+        continue;
+      }
+      const { role, text, model } = message as Record<string, unknown>;
+      if (role === "user" && typeof text === "string") {
+        return isModelRef(model) ? { text, model } : { text };
+      }
+    }
+    return undefined;
+  }
+}
+
+function isModelRef(value: unknown): value is ModelRef {
+  if (typeof value !== "object" || value === null) return false;
+  const { providerId, modelId } = value as Record<string, unknown>;
+  return typeof providerId === "string" && typeof modelId === "string";
 }
