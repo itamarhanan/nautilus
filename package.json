@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "turbo run dev --parallel",
     "dev:local": "./scripts/dev-local.sh",
+    "deploy:studio": "./scripts/deploy-lightning.sh",
     "dev:server": "pnpm --filter @nautilus/server dev",
     "dev:web": "pnpm --filter @nautilus/web dev",
     "build": "turbo run build",
