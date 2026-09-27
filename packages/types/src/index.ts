@@ -74,6 +74,65 @@ export function parseResolutions(value: unknown): SyncResolutions {
   return resolutions;
 }
 
+export type SyncFileChange = {
+  path: string;
+  status: "added" | "modified" | "deleted" | "renamed";
+  oldPath?: string | undefined;
+  binary: boolean;
+  additions: number;
+  deletions: number;
+  hunks: SyncDiffHunk[];
+  omitted?: "generated" | "large" | "limit" | undefined;
+};
+
+const generatedFileNames = new Set([
+  "pnpm-lock.yaml",
+  "package-lock.json",
+  "yarn.lock",
+  "bun.lockb",
+  "bun.lock",
+  "Cargo.lock",
+  "poetry.lock",
+  "uv.lock",
+  "composer.lock",
+  "Gemfile.lock",
+  "go.sum",
+]);
+
+export function isGeneratedFile(path: string): boolean {
+  return generatedFileNames.has(path.slice(path.lastIndexOf("/") + 1));
+}
+
+export type SyncDiffLine = {
+  type: "context" | "addition" | "deletion";
+  oldLine: number | null;
+  newLine: number | null;
+  content: string;
+};
+
+export type SyncDiffHunk = {
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  lines: SyncDiffLine[];
+};
+
+export type SyncDiff = {
+  files: SyncFileChange[];
+  additions: number;
+  deletions: number;
+};
+
+export type SyncState = {
+  projectId: string;
+  head: string | null;
+  baseHead: string | null;
+  dirty: boolean;
+  changes: SyncDiff;
+
+  excludedRepositories?: string[] | undefined;
+};
 export type ProjectId = string;
 
 export type ProjectState =
