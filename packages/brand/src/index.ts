@@ -119,3 +119,18 @@ export function shellMark(size = 640, gap = 30): string {
     .map((chamber) => `M${chamber.map((point) => point.map(round).join(" ")).join("L")}Z`)
     .join("");
 }
+
+export function appIconSvg({ maskable = false }: { maskable?: boolean } = {}): string {
+  const { night, slate, pearl, mist } = brand.colors;
+  return [
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${String(markSize)} ${String(markSize)}">`,
+    "<defs>",
+    `<linearGradient id="tile" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${night}"/><stop offset="1" stop-color="${slate}"/></linearGradient>`,
+    `<linearGradient id="shell" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${pearl}"/><stop offset="1" stop-color="${mist}"/></linearGradient>`,
+    "</defs>",
+    `<rect width="${String(markSize)}" height="${String(markSize)}"${maskable ? "" : ' rx="232"'} fill="url(#tile)"/>`,
+    `<path d="${shellMark(maskable ? 520 : 640)}" fill="url(#shell)"/>`,
+    "</svg>",
+    "",
+  ].join("\n");
+}
