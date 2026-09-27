@@ -118,6 +118,33 @@ export class ProjectManager {
     return (await this.projectHasCode?.(projectId)) ?? true;
   }
 
+  async recoverActiveProject(): Promise<ProjectRecord | undefined> {
+    const id = this.registry.getActiveProjectId();
+    if (!id) {
+      return undefined;
+    }
+    const project = this.registry.getProject(id);
+    if (!project || !this.projects.has(id) || project.state === "unhealthy") {
+      if (project?.state !== "unhealthy") {
+        this.registry.setActiveProjectId(null);
+      }
+      return undefined;
+    }
+    if (project.state === "inactive" || project.state === "stopped") {
+      this.registry.setActiveProjectId(null);
+      return undefined;
+    }
+    try {
+      return await this.start(id);
+    } catch (error) {
+      this.logger.error("active_project_recovery_failed", {
+        projectId: id,
+        error: error instanceof Error ? error.message : "unknown_error",
+      });
+      return undefined;
+    }
+  }
+
   async start(id: string): Promise<ProjectRecord> {
     return this.serialized(() => this.startInternal(id));
   }
