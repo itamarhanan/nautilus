@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
-import { dirname } from "node:path";
+import { mkdir, open, readFile, readdir, rename, rm, stat } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
 export async function readJson<T>(path: string, fallback: T): Promise<T> {
   try {
@@ -91,4 +91,25 @@ export async function withLock<T>(path: string, action: () => Promise<T>): Promi
   } finally {
     await rm(path, { force: true });
   }
+}
+
+export async function pruneFiles(
+  directory: string,
+  options: {
+    keep: number;
+    suffix: string;
+    protect?: (path: string) => Promise<boolean>;
+  },
+): Promise<void> {
+  const entries = await readdir(directory).catch(() => [] as string[]);
+  const files: { path: string; modified: number }[] = [];
+  for (const entry of entries) {
+    if (!entry.endsWith(options.suffix)) continue;
+    const path = join(directory, entry);
+    if (await options.protect?.(path)) continue;
+    const info = await stat(path).catch(() => null);
+    if (info?.isFile()) files.push({ path, modified: info.mtimeMs });
+  }
+  files.sort((left, right) => right.modified - left.modified);
+  await Promise.all(files.slice(options.keep).map(({ path }) => rm(path, { force: true })));
 }
