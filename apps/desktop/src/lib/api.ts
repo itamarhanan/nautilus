@@ -1,12 +1,15 @@
 import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
 import type {
   DeviceResponse,
+  LocalSyncStatusResponse,
   PairingCodeResponse,
   ProjectRecord,
   RecoverySummary,
   SyncConflict,
   SyncDirection,
   SyncEvent,
+  SyncFileChange,
+  SyncGrantResponse,
   SyncResolutions,
   SyncResponse,
   SyncStatusResponse,
@@ -282,6 +285,61 @@ export class ControlApi {
       body,
       options,
       "runner_offline",
+    );
+  }
+}
+
+export class AgentApi {
+  constructor(
+    readonly baseUrl: string,
+    private readonly launchKey: string,
+  ) {}
+
+  async healthy(): Promise<boolean> {
+    try {
+      await requestJson(
+        new URL("/health", `${this.baseUrl}/`),
+        "GET",
+        {},
+        undefined,
+        { timeoutMs: 2_000 },
+        "agent_offline",
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  mintGrant(projectId: string, direction: SyncDirection): Promise<SyncGrantResponse> {
+    return this.request("POST", "/v1/grants", { projectId, direction });
+  }
+
+  async revokeGrant(grantId: string): Promise<void> {
+    await this.request("POST", "/v1/grants/revoke", { grantId });
+  }
+
+  status(projectId: string): Promise<LocalSyncStatusResponse> {
+    return this.request("GET", `/v1/status?projectId=${encodeURIComponent(projectId)}`);
+  }
+
+  compare(projectId: string, remoteHead: string, path: string): Promise<SyncFileChange> {
+    const query = new URLSearchParams({ projectId, remoteHead, path });
+    return this.request("GET", `/v1/compare?${query.toString()}`);
+  }
+
+  undoPull(projectId: string, requestId: string): Promise<LocalSyncStatusResponse> {
+    return this.request("POST", "/v1/pull/undo", { projectId, requestId });
+  }
+
+  private request<T>(method: string, pathname: string, body?: unknown): Promise<T> {
+    return requestJson<T>(
+      new URL(pathname, `${this.baseUrl}/`),
+      method,
+      { authorization: `Bearer ${this.launchKey}` },
+      body,
+      {},
+      "agent_offline",
     );
   }
 }
