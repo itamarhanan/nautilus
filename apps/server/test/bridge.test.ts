@@ -335,6 +335,54 @@ test("a project registered after boot can open a session", async () => {
   }
 });
 
+test("a project registered from the desktop is still configured after a restart", async () => {
+  const projectsRoot = await mkdtemp(join(tmpdir(), "nautilus-restart-"));
+  const boot = () =>
+    createNautilusApp({
+      authSecret,
+      logger: new Logger(() => undefined),
+      projects: [],
+      projectsRoot,
+      openCode: new FakeOpenCode(),
+      registryPath: join(projectsRoot, "registry.db"),
+    });
+  const post = (port: number, path: string, body: unknown) =>
+    fetch(`http://127.0.0.1:${String(port)}${path}`, {
+      method: "POST",
+      headers: {
+        "x-nautilus-control": "1",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+
+  try {
+    const before = await boot();
+    try {
+      const port = await listen(before);
+      expect((await post(port, "/api/projects", { projectId: "kept", name: "Kept" })).status).toBe(
+        201,
+      );
+    } finally {
+      await before.close();
+    }
+
+    const after = await boot();
+    try {
+      const port = await listen(after);
+      const created = await post(port, "/api/sessions", { projectId: "kept", title: "After" });
+      expect(created.status).toBe(201);
+      // Not synced yet, so it cannot start, but it is no longer unknown.
+      const started = await post(port, "/api/projects/kept/start", {});
+      expect(started.status).toBe(409);
+    } finally {
+      await after.close();
+    }
+  } finally {
+    await rm(projectsRoot, { recursive: true, force: true });
+  }
+});
+
 test("a prompt runs on the model and variant it names, and a retry keeps both", async () => {
   const openCode = new FakeOpenCode();
   const app = await createNautilusApp({

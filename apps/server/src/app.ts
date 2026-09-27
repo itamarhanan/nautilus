@@ -124,6 +124,22 @@ export async function createNautilusApp(options: AppOptions = {}): Promise<Nauti
   for (const project of projects) {
     registry.upsertProject(project);
   }
+  // A project the desktop registered is kept only in the registry; a projects
+  // file holds just the ones that exist before any desktop connects. Without
+  // this, every desktop project is "not configured" after a restart and can be
+  // neither started, prompted nor synced.
+  for (const {
+    id,
+    name,
+    remotePath,
+    devCommand,
+    devPort,
+    previewPath,
+  } of registry.listProjects()) {
+    if (!projectMap.has(id)) {
+      projectMap.set(id, { id, name, remotePath, devCommand, devPort, previewPath });
+    }
+  }
   const auth = new Auth(
     registry,
     authSecret,
@@ -141,6 +157,9 @@ export async function createNautilusApp(options: AppOptions = {}): Promise<Nauti
     options.previewSessionSeconds ?? serverOptions.previewSessionSeconds,
   );
   const sync = options.sync;
+  for (const project of projectMap.values()) {
+    sync?.addProject(project);
+  }
   const projectManager = new ProjectManager(
     registry,
     projectMap,
