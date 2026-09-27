@@ -75,11 +75,9 @@ stop_service() {
 
 [[ "${HOME:-}" == /* ]] || fail 'HOME must be an absolute path'
 [[ -x "${ROOT_DIR}/scripts/install-opencode.sh" ]] || fail 'scripts/install-opencode.sh must be executable'
-command -v curl >/dev/null 2>&1 || fail 'curl is required'
-command -v flock >/dev/null 2>&1 || fail 'flock is required'
-command -v readlink >/dev/null 2>&1 || fail 'readlink is required'
-command -v setsid >/dev/null 2>&1 || fail 'setsid is required'
-command -v stat >/dev/null 2>&1 || fail 'stat is required'
+# A Studio image can lack a program the boot needs. Install it rather than
+# failing the boot. It never prompts, and fails only if it cannot install.
+"${ROOT_DIR}/scripts/ensure-system-tools.sh" --install || fail 'a required system program is missing and could not be installed'
 validate_port NAUTILUS_SERVER_PORT "${SERVER_PORT}"
 validate_port NAUTILUS_GATEWAY_PORT "${GATEWAY_PORT}"
 validate_port NAUTILUS_PREVIEW_PORT "${PREVIEW_PORT}"
