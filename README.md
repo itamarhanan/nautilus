@@ -119,6 +119,21 @@ The gateway is the only thing that should ever be public.
 |      4100 | sync agent  | The PC's loopback agent, started by the desktop app                                                    |
 |      4200 | (forward)   | The port on the runner that the reverse forward connects to the PC's agent                             |
 
+## Install the desktop app
+
+Download the installer for your system from the [latest release](https://github.com/itamarhanan/nautilus/releases/latest). Nothing else is needed: the sync agent ships inside the app, so the PC needs no Node, Rust or pnpm.
+
+| System                    | File                                        | Install                                                   |
+| ------------------------- | ------------------------------------------- | --------------------------------------------------------- |
+| Ubuntu, Debian and others | `nautilus-desktop_<version>_amd64.deb`      | `sudo apt install ./nautilus-desktop_<version>_amd64.deb` |
+| Any Linux                 | `nautilus-desktop_<version>_amd64.AppImage` | `chmod +x` the file, then run it                          |
+| macOS (Apple Silicon)     | `Nautilus_<version>_aarch64.dmg`            | Open it and drag Nautilus to Applications                 |
+| Windows                   | `Nautilus_<version>_x64-setup.exe`          | Run it                                                    |
+
+The builds are not signed. macOS says the app "cannot be opened"; right-click it in Applications, choose **Open**, then **Open** again. Windows SmartScreen may warn about an unknown publisher; choose **More info**, then **Run anyway**. Linux needs `openssh-client`, which the `.deb` installs for you.
+
+Then set up a runner, below, and connect the app to it in **Settings › Runner**.
+
 ## Self-hosting
 
 The runner is a Node process behind an HTTP proxy, so anywhere that gives you one public HTTPS port and an SSH endpoint works. A free Lightning AI CPU Studio is the tested path and what the scripts target.
@@ -157,7 +172,22 @@ pnpm --filter @nautilus/desktop tauri:dev   # the real Tauri shell
 
 ### Option B: the runner on a Lightning AI Studio
 
-This is the intended deployment. The full steps are in [`scripts/bootstrap-lightning.md`](./scripts/bootstrap-lightning.md). In short:
+This is the intended deployment. `scripts/deploy-lightning.sh` does all of it from the PC: it starts the Studio, exposes the two ports, uploads the working tree, installs the boot hook, builds and starts the runner, and waits for the public URL.
+
+```bash
+lightning login
+printf 'NAUTILUS_TEAMSPACE=owner/teamspace\n' > scripts/deploy-lightning.local   # ignored by Git
+./scripts/deploy-lightning.sh             # deploy, and again after every change
+./scripts/deploy-lightning.sh login       # once: sign a model provider in to the runner
+./scripts/deploy-lightning.sh link        # a QR code that opens the app on a phone and links it
+./scripts/deploy-lightning.sh status      # also: restart, logs [server|web|boot]
+```
+
+A free Studio sleeps after 10 idle minutes, and a sleeping one answers its URL with a 404. The script turns on Lightning's `auto_start` for both ports, so opening the URL wakes the Studio instead. The page waits while it boots, and the runner answers about three minutes later. Keeping it awake all the time means turning auto-sleep off, which Lightning bills as a paid Studio.
+
+The code goes to `~/nautilus-src` on the Studio, and a small `~/.lightning_studio/on_start.sh` hands each boot to the repo's own hook. A redeploy stops the runner, keeps the old tree as `~/nautilus-src.previous` and never overwrites an existing `nautilus.env`.
+
+The full steps, for doing it by hand, are in [`scripts/bootstrap-lightning.md`](./scripts/bootstrap-lightning.md). In short:
 
 **1. Create a free CPU Studio and expose only the gateway.**
 
@@ -276,6 +306,19 @@ pnpm test:watch                           # watch mode
 `lint` and `test` run once from the repository root rather than per package; `typecheck` and `build` stay per package, because each has its own tsconfig and dependency order.
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) before sending a change.
+
+### Releasing the desktop app
+
+The Release workflow builds the installers on Linux, macOS and Windows runners and attaches them to a draft release. Each platform builds on its own runner, because the sync agent inside the app is a copy of that machine's Node.
+
+```bash
+# 1. Set "version" in apps/desktop/package.json, e.g. 0.2.0, and commit it.
+# 2. Tag that commit with the same version and push the tag:
+git tag v0.2.0 && git push origin v0.2.0
+# 3. When the workflow finishes, check the files on the draft and publish it.
+```
+
+The workflow refuses a tag that does not match the version. Linux ships a `.deb` and an AppImage but no `.rpm`: the app carries a whole Node runtime, and Tauri's RPM packer compresses it slowly enough to stall a build.
 
 ## License
 

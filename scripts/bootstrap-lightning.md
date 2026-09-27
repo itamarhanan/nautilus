@@ -2,6 +2,10 @@
 
 This procedure uses a free CPU Studio and keeps the PC as the source of truth. It does not use GitHub, a payment method, a domain, or a public PC SSH service.
 
+`scripts/deploy-lightning.sh` runs sections 1 to 3 and the Studio half of section 4 from the PC. Run it with `--help` for the commands. The steps below are what it does, for doing it by hand or debugging it.
+
+Lightning runs a boot hook only from the Studio's home, `~/.lightning_studio/on_start.sh`. The runner keeps its state in `~/nautilus`, so the repository cannot be cloned there. The script puts it in `~/nautilus-src` and writes a home hook that calls `~/nautilus-src/.lightning_studio/on_start.sh`. Do the same by hand if you place the repository anywhere other than the Studio's home itself.
+
 ## 1. Prerequisites
 
 Install and authenticate the Lightning CLI on the PC:
