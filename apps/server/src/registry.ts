@@ -344,6 +344,14 @@ export class Registry {
     return this.getProject(config.id) as ProjectRecord;
   }
 
+  recoverInterruptedProjects(): void {
+    this.db
+      .prepare(
+        "UPDATE projects SET state = 'error', last_error = 'runner_restarted', updated_at = ? WHERE state IN ('running', 'starting', 'editing', 'checkpointing')",
+      )
+      .run(now());
+  }
+
   getProject(id: string): ProjectRecord | undefined {
     const row = this.db
       .prepare(
@@ -585,6 +593,55 @@ export class Registry {
       }
     }
     return undefined;
+  }
+
+  recoverInterruptedAgentSessions(): SessionRecord[] {
+    const timestamp = now();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const rows = this.db
+        .prepare(
+          `
+          SELECT id, project_id AS projectId, opencode_session_id AS openCodeSessionId,
+            title, status, last_sequence AS lastSequence, created_at AS createdAt, updated_at AS updatedAt
+          FROM agent_sessions WHERE status = 'running'
+        `,
+        )
+        .all() as SessionRow[];
+      for (const row of rows) {
+        this.db
+          .prepare("UPDATE agent_sessions SET status = 'interrupted', updated_at = ? WHERE id = ?")
+          .run(timestamp, row.id);
+        const sequence = row.lastSequence + 1;
+        this.db
+          .prepare(
+            `
+            INSERT INTO agent_session_events
+              (session_id, sequence, project_id, timestamp, type, durable, payload)
+            VALUES (?, ?, ?, ?, 'session.interrupted', 1, ?)
+          `,
+          )
+          .run(
+            row.id,
+            sequence,
+            row.projectId,
+            timestamp,
+            JSON.stringify({ reason: "runner_restarted" }),
+          );
+        this.db
+          .prepare("UPDATE agent_sessions SET last_sequence = ?, updated_at = ? WHERE id = ?")
+          .run(sequence, timestamp, row.id);
+      }
+      this.db.exec("COMMIT");
+      return rows.map((row) => ({
+        ...row,
+        status: "interrupted",
+        lastSequence: row.lastSequence + 1,
+      }));
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 }
 
