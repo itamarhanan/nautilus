@@ -1,0 +1,154 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Permissions for the Nautilus desktop app. It reads and writes only ~/.nautilus, reads folder listings, package.json files and ~/.ssh/config for project and SSH detection, talks HTTP only to loopback, and can start exactly three programs: ssh twice and its own sync agent. It also shows notifications, opens a project file in its default app for a conflict, and closes its own window when quitting from the tray.",
+  "windows": ["main"],
+  "permissions": [
+    "core:path:default",
+    "core:event:default",
+    "core:window:allow-destroy",
+    "notification:default",
+    "dialog:allow-open",
+    {
+      "identifier": "opener:allow-open-path",
+      "allow": [
+        {
+          "path": "$HOME/**"
+        }
+      ]
+    },
+    {
+      "identifier": "fs:allow-read-text-file",
+      "allow": [
+        {
+          "path": "$HOME/.nautilus/config.json"
+        },
+        {
+          "path": "$HOME/.nautilus/state.json"
+        },
+        {
+          "path": "$HOME/.ssh/config"
+        },
+        {
+          "path": "$HOME/**/package.json"
+        }
+      ]
+    },
+    {
+      "identifier": "fs:allow-read-dir",
+      "allow": [
+        {
+          "path": "$HOME"
+        },
+        {
+          "path": "$HOME/**"
+        }
+      ]
+    },
+    {
+      "identifier": "fs:allow-write-text-file",
+      "allow": [
+        {
+          "path": "$HOME/.nautilus/config.json"
+        },
+        {
+          "path": "$HOME/.nautilus/state.json"
+        }
+      ]
+    },
+    {
+      "identifier": "fs:allow-mkdir",
+      "allow": [
+        {
+          "path": "$HOME/.nautilus"
+        }
+      ]
+    },
+    {
+      "identifier": "http:default",
+      "allow": [
+        {
+          "url": "http://127.0.0.1:*"
+        }
+      ]
+    },
+    {
+      "identifier": "shell:allow-spawn",
+      "allow": [
+        {
+          "name": "nautilus-ssh-control",
+          "cmd": "ssh",
+          "sidecar": false,
+          "args": [
+            "-F",
+            "/dev/null",
+            "-N",
+            "-T",
+            "-i",
+            {
+              "validator": "^/[^\\r\\n]*$"
+            },
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            "ExitOnForwardFailure=yes",
+            "-o",
+            "ServerAliveInterval=15",
+            "-o",
+            "ServerAliveCountMax=3",
+            "-o",
+            "UpdateHostKeys=no",
+            "-L",
+            {
+              "validator": "^127\\.0\\.0\\.1:4[0-9]{4}:127\\.0\\.0\\.1:4001$"
+            },
+            {
+              "validator": "^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$"
+            }
+          ]
+        },
+        {
+          "name": "nautilus-ssh-sync",
+          "cmd": "ssh",
+          "sidecar": false,
+          "args": [
+            "-F",
+            "/dev/null",
+            "-N",
+            "-T",
+            "-i",
+            {
+              "validator": "^/[^\\r\\n]*$"
+            },
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            "ExitOnForwardFailure=yes",
+            "-o",
+            "ServerAliveInterval=15",
+            "-o",
+            "ServerAliveCountMax=3",
+            "-o",
+            "UpdateHostKeys=no",
+            "-R",
+            "127.0.0.1:4200:127.0.0.1:4100",
+            {
+              "validator": "^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+$"
+            }
+          ]
+        },
+        {
+          "name": "binaries/nautilus-sync-agent",
+          "sidecar": true,
+          "args": ["--launch-key-stdin"]
+        }
+      ]
+    },
+    "shell:allow-stdin-write",
+    "shell:allow-kill"
+  ]
+}
