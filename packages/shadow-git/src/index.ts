@@ -3,7 +3,14 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep, dirname } from "node:path";
 import { tmpdir } from "node:os";
-import type { SyncBundle } from "@nautilus/types";
+import {
+  isGeneratedFile,
+  type SyncBundle,
+  type SyncDiff,
+  type SyncDiffHunk,
+  type SyncDiffLine,
+  type SyncFileChange,
+} from "@nautilus/types";
 
 export { LockBusyError, pruneFiles, readJson, withLock, writeJson } from "./durable";
 
@@ -53,6 +60,9 @@ const legacyRefs: readonly (readonly [legacy: string, current: string])[] = [
   ["refs/heads/nautilus", headRef],
   ["refs/heads/nautilus-baseline", baselineRef],
 ];
+
+const maxFileDiffLines = 3_000;
+const maxFileDiffBytes = 1_000_000;
 
 export const commitPattern = /^[0-9a-f]{40,64}$/;
 
@@ -443,9 +453,107 @@ export class ShadowGit {
       await rm(directory, { recursive: true, force: true });
     }
   }
+
+  async changedPaths(baseHead: string | null): Promise<string[]> {
+    await this.initialize();
+    const paths = new Set<string>();
+    const current = await this.head();
+    if (baseHead && current && baseHead !== current) {
+      const committed = (await this.git(["diff", "--name-only", "-z", baseHead, current])).toString(
+        "utf8",
+      );
+      for (const path of committed.split("\0")) if (path) paths.add(path);
+    }
+    if (current === null) {
+      const untracked = await this.git(["ls-files", "--others", "--exclude-standard", "-z"]);
+      for (const path of untracked.toString("utf8").split("\0")) if (path) paths.add(path);
+      return [...paths].sort();
+    }
+
+    const status = (
+      await this.git(["diff", "--name-status", "-z", "--find-renames", current, "--"])
+    )
+      .toString("utf8")
+      .split("\0")
+      .filter(Boolean);
+
+    for (let index = 0; index < status.length;) {
+      const code = status[index] ?? "";
+      const path = status[index + 1] ?? "";
+      if (!path) break;
+      paths.add(path);
+      index += code.startsWith("R") || code.startsWith("C") ? 3 : 2;
+    }
+    const untracked = await this.git(["ls-files", "--others", "--exclude-standard", "-z"]);
+    for (const path of untracked.toString("utf8").split("\0")) if (path) paths.add(path);
+    return [...paths].sort();
+  }
+
+  async diff(baseHead: string | null, head: string): Promise<SyncDiff> {
+    const base = baseHead ?? (await this.emptyTree());
+    const changes = parseNameStatus(
+      (await this.git(["diff", "--name-status", "-z", "--find-renames", base, head])).toString(
+        "utf8",
+      ),
+    );
+    const statistics = parseNumstat(
+      (await this.git(["diff", "--numstat", "-z", "--find-renames", base, head])).toString("utf8"),
+    );
+    let additions = 0;
+    let deletions = 0;
+    for (const statistic of statistics.values()) {
+      additions += statistic.additions;
+      deletions += statistic.deletions;
+    }
+    const files: SyncFileChange[] = changes.slice(0, 1_000).map((change) => {
+      const statistic = statistics.get(change.path);
+      return {
+        ...change,
+        binary: statistic?.binary ?? false,
+        additions: statistic?.additions ?? 0,
+        deletions: statistic?.deletions ?? 0,
+        hunks: [],
+      };
+    });
+
+    for (const file of files) {
+      if (file.binary || file.additions + file.deletions === 0) continue;
+      if (isGeneratedFile(file.path)) {
+        file.omitted = "generated";
+        continue;
+      }
+      if (file.additions + file.deletions > maxFileDiffLines) {
+        file.omitted = "large";
+        continue;
+      }
+      const output = await this.git([
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--unified=3",
+        "--find-renames",
+        base,
+        head,
+        "--",
+        file.path,
+      ]);
+
+      if (output.length > maxFileDiffBytes) {
+        file.omitted = "large";
+        continue;
+      }
+      file.hunks = parseUnifiedDiff(output.toString("utf8"), Number.POSITIVE_INFINITY).hunks;
+    }
+    return { files, additions, deletions };
+  }
+
   async restoreHead(head: string): Promise<void> {
     await this.git(["read-tree", "-u", "--reset", head]);
     await this.git(["update-ref", headRef, head]);
+  }
+
+  private async emptyTree(): Promise<string> {
+    return (await this.git(["mktree"])).toString("utf8").trim();
   }
 
   private async validateIndex(): Promise<void> {
@@ -579,4 +687,107 @@ export class ShadowGit {
     await visit(this.workTree);
     return excluded;
   }
+}
+
+type DiffStatistic = {
+  path: string;
+  additions: number;
+  deletions: number;
+  binary: boolean;
+};
+
+function parseNameStatus(
+  output: string,
+): Omit<SyncFileChange, "binary" | "additions" | "deletions" | "hunks">[] {
+  const entries = output.split("\0").filter((part) => part.length > 0);
+  const changes: Omit<SyncFileChange, "binary" | "additions" | "deletions" | "hunks">[] = [];
+  let index = 0;
+  while (index < entries.length) {
+    const code = entries[index++];
+    if (!code) continue;
+    if (code.startsWith("R") || code.startsWith("C")) {
+      const oldPath = entries[index++];
+      const path = entries[index++];
+      if (oldPath && path) changes.push({ path, oldPath, status: "renamed" });
+      continue;
+    }
+    const path = entries[index++];
+    if (path)
+      changes.push({
+        path,
+        status: code.startsWith("A") ? "added" : code.startsWith("D") ? "deleted" : "modified",
+      });
+  }
+  return changes;
+}
+
+function parseNumstat(output: string): Map<string, DiffStatistic> {
+  const entries = output.split("\0").filter((part) => part.length > 0);
+  const statistics = new Map<string, DiffStatistic>();
+  let index = 0;
+  while (index < entries.length) {
+    const fields = entries[index++]?.split("\t") ?? [];
+    const [additionsField, deletionsField, first] = fields;
+    if (additionsField === undefined || deletionsField === undefined || first === undefined)
+      continue;
+    let path = first;
+    if (path === "") {
+      index += 1;
+      path = entries[index++] ?? "";
+      if (!path) continue;
+    }
+    const additions = /^\d+$/.test(additionsField) ? Number(additionsField) : 0;
+    const deletions = /^\d+$/.test(deletionsField) ? Number(deletionsField) : 0;
+    statistics.set(path, {
+      path,
+      additions,
+      deletions,
+      binary: additionsField === "-" || deletionsField === "-",
+    });
+  }
+  return statistics;
+}
+
+function parseUnifiedDiff(output: string, limit: number): { hunks: SyncDiffHunk[]; lines: number } {
+  const hunks: SyncDiffHunk[] = [];
+  let current: SyncDiffHunk | null = null;
+  let oldLine = 0;
+  let newLine = 0;
+  let count = 0;
+  for (const raw of output.split("\n")) {
+    const hunk = raw.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
+    if (hunk) {
+      current = {
+        oldStart: Number(hunk[1]),
+        oldLines: Number(hunk[2] || 1),
+        newStart: Number(hunk[3]),
+        newLines: Number(hunk[4] || 1),
+        lines: [],
+      };
+      oldLine = current.oldStart;
+      newLine = current.newStart;
+      hunks.push(current);
+      continue;
+    }
+    if (!current || count >= limit) continue;
+    const type = raw.startsWith("+")
+      ? "addition"
+      : raw.startsWith("-")
+        ? "deletion"
+        : raw.startsWith(" ")
+          ? "context"
+          : null;
+    if (!type) continue;
+    const line: SyncDiffLine = {
+      type,
+      oldLine: type === "addition" ? null : oldLine,
+      newLine: type === "deletion" ? null : newLine,
+      content: raw.slice(1),
+    };
+    current.lines.push(line);
+    if (type !== "addition") oldLine += 1;
+    if (type !== "deletion") newLine += 1;
+    count += 1;
+  }
+  return { hunks, lines: count };
 }
