@@ -1,8 +1,8 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
-import { LockBusyError, readJson, withLock, writeJson } from "../src/durable";
+import { LockBusyError, pruneFiles, readJson, withLock, writeJson } from "../src/durable";
 
 const roots: string[] = [];
 
@@ -88,5 +88,41 @@ describe("readJson and writeJson", () => {
     await writeFile(path, "{ not json");
     expect(await readJson(path, "fallback")).toBe("fallback");
     expect(await readFile(path, "utf8")).toBe("{ not json");
+  });
+});
+
+describe("pruneFiles", () => {
+  test("keeps the newest files, never counts protected ones, and ignores other suffixes", async () => {
+    const directory = join(await lockPath(), "..", "backups");
+    await mkdir(directory, { recursive: true });
+    const names = ["a", "b", "c", "d", "e"];
+    for (const [index, name] of names.entries()) {
+      const path = join(directory, `${name}.bundle`);
+      await writeFile(path, name);
+      const time = new Date(2026, 0, 1, 0, index);
+      await utimes(path, time, time);
+    }
+    await writeFile(join(directory, "notes.txt"), "kept");
+    await pruneFiles(directory, {
+      keep: 2,
+      suffix: ".bundle",
+
+      protect: (path) => Promise.resolve(path.endsWith("a.bundle")),
+    });
+    expect((await readdir(directory)).sort()).toEqual([
+      "a.bundle",
+      "d.bundle",
+      "e.bundle",
+      "notes.txt",
+    ]);
+  });
+
+  test("does nothing for a directory that does not exist", async () => {
+    await expect(
+      pruneFiles(join(await lockPath(), "..", "missing"), {
+        keep: 1,
+        suffix: ".json",
+      }),
+    ).resolves.toBeUndefined();
   });
 });
