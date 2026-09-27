@@ -1,0 +1,21 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema-jsonc.json",
+  "ignoreExportsUsedInFile": true,
+
+  "ignoreBinaries": ["rustc"],
+  "workspaces": {
+    "apps/desktop": {
+      "ignoreFiles": ["src-tauri/**"],
+      "ignoreDependencies": ["postject"],
+    },
+    "apps/web": {
+      "ignoreFiles": ["public/**"],
+    },
+    "apps/server": {
+      "ignoreDependencies": ["opencode-ai"],
+    },
+    "packages/brand": {
+      "ignoreDependencies": ["@tauri-apps/cli"],
+    },
+  },
+}
