@@ -83,3 +83,78 @@ export type PreviewTokenResponse = {
   previewUrl?: string | undefined;
   expiresAt: string;
 };
+
+export type SessionStatus = "idle" | "running" | "interrupted" | "error";
+
+export type SessionRecord = {
+  id: string;
+  projectId: ProjectId;
+  openCodeSessionId: string;
+  title: string;
+  status: SessionStatus;
+  lastSequence: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type SessionEventType =
+  | "session.started"
+  | "session.retry"
+  | "session.message"
+  | "session.delta"
+  | "session.tool"
+  | "session.todo"
+  | "session.file_change"
+  | "session.permission"
+  | "session.checkpoint"
+  | "session.completed"
+  | "session.interrupted"
+  | "session.error";
+
+export type SessionEvent = {
+  sessionId: string;
+  projectId: ProjectId;
+  sequence: number;
+  timestamp: string;
+  type: SessionEventType;
+  durable: boolean;
+  payload: Record<string, unknown>;
+};
+
+export type SubagentTag = { subagent?: string | undefined };
+
+export type TodoStatus = "pending" | "in_progress" | "completed" | "cancelled";
+
+export type TodoItem = {
+  id: string;
+  content: string;
+  status: TodoStatus;
+  priority: "high" | "medium" | "low";
+};
+
+export type SessionSnapshot = {
+  session: SessionRecord;
+  events: SessionEvent[];
+};
+
+export type ModelRef = {
+  providerId: string;
+  modelId: string;
+  variant?: string | undefined;
+};
+
+export type AgentModel = ModelRef & {
+  name: string;
+  providerName: string;
+  isReasoning: boolean;
+
+  contextLimit: number | null;
+
+  variants: string[];
+};
+
+export type ModelsResponse = {
+  models: AgentModel[];
+
+  default: ModelRef | null;
+};
