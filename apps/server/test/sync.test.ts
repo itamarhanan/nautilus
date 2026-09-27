@@ -1007,3 +1007,65 @@ describe("a project is not ready until it has been pushed once", () => {
     await expect(coordinator.hasCode("unknown")).rejects.toBeInstanceOf(SyncCoordinatorError);
   });
 });
+
+describe("agent turn checkpoints", () => {
+  async function runner() {
+    const remote = await project("remote");
+    const coordinator = new SyncCoordinator({
+      projects: [projectConfig(remote.workTree)],
+      shadowRoot: join(remote.root, "state-shadow"),
+      statePath: join(remote.root, "sync-state"),
+      client: new TunnelSyncClient({ endpoint: "http://127.0.0.1:9/v1/sync" }),
+    });
+    const turn = async (edit: () => Promise<void>) => {
+      await edit();
+      return coordinator.checkpoint("demo", "session-1");
+    };
+    const read = (name: string) => readFile(join(remote.workTree, name), "utf8");
+    const write = (name: string, text: string) => writeFile(join(remote.workTree, name), text);
+    return { coordinator, turn, read, write };
+  }
+
+  test("each turn's changes are only its own, and an unchanged turn has none", async () => {
+    const { coordinator, turn, write } = await runner();
+    await turn(() => write("a.txt", "one\n"));
+    const second = await turn(() => write("b.txt", "new\n"));
+    const idle = await turn(() => Promise.resolve());
+
+    const changed = await coordinator.changes("demo", second.previousHead, second.commit);
+    expect(changed.files.map((file) => file.path)).toEqual(["b.txt"]);
+    expect(idle.commit).toBe(idle.previousHead);
+    expect((await coordinator.changes("demo", idle.previousHead, idle.commit)).files).toEqual([]);
+    await expect(coordinator.changes("demo", null, "f".repeat(40))).rejects.toMatchObject({
+      code: "checkpoint_not_found",
+    });
+  });
+
+  test("reverting an earlier turn undoes only that turn and keeps later work", async () => {
+    const { coordinator, turn, read, write } = await runner();
+    await turn(() => write("a.txt", "one\n"));
+    const edit = await turn(() => write("a.txt", "two\n"));
+    await turn(() => write("b.txt", "later\n"));
+
+    const reverted = await coordinator.revert("demo", edit.commit, edit.previousHead, "session-1");
+    expect(reverted.status).toBe("ok");
+    expect(await read("a.txt")).toBe("one\n");
+    expect(await read("b.txt")).toBe("later\n");
+
+    if (reverted.status !== "ok") throw new Error("expected a clean revert");
+    const { commit, previousHead } = reverted.checkpoint;
+    expect((await coordinator.revert("demo", commit, previousHead, "session-1")).status).toBe("ok");
+    expect(await read("a.txt")).toBe("two\n");
+  });
+
+  test("a revert that would overwrite later edits to the same lines is refused", async () => {
+    const { coordinator, turn, read, write } = await runner();
+    await turn(() => write("a.txt", "one\n"));
+    const edit = await turn(() => write("a.txt", "two\n"));
+    await turn(() => write("a.txt", "three\n"));
+
+    const result = await coordinator.revert("demo", edit.commit, edit.previousHead, "session-1");
+    expect(result).toEqual({ status: "conflict", conflicts: ["a.txt"] });
+    expect(await read("a.txt")).toBe("three\n");
+  });
+});
