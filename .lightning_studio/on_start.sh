@@ -170,6 +170,13 @@ gateway_health_url="http://127.0.0.1:${GATEWAY_PORT}/health/ready"
 web_url="http://127.0.0.1:${WEB_PORT}/"
 wait_for_url server "${server_health_url}" "${server_pid}" 180
 
+# Restarting a project's dev server is a convenience on top of a working
+# runner, so nothing in this block may fail the boot: a project that cannot
+# start is reported, and the runner stays up without it.
+recovery_note() {
+  printf '%s\n' "$1" >>"${LOG_DIR}/server.log"
+  printf 'warning: %s\n' "$1" >&2
+}
 if [[ "${DEV_SERVER_RESTART}" == auto ]]; then
   recovery_projects="$(curl --fail --silent --show-error --max-time 10 \
     -H 'X-Nautilus-Control: 1' \
@@ -180,18 +187,29 @@ if [[ "${DEV_SERVER_RESTART}" == auto ]]; then
         const body = JSON.parse(input);
         const projects = Array.isArray(body.projects) ? body.projects : [];
         const recoverable = projects.filter((project) => project.state === "error" && project.lastError === "runner_restarted");
-        if (recoverable.length > 1) throw new Error("multiple projects require restart recovery; refusing to choose one");
+        if (recoverable.length > 1) {
+          process.stderr.write("multiple projects require restart recovery; refusing to choose one\n");
+          process.exit(3);
+        }
         if (recoverable.length === 1) process.stdout.write(recoverable[0].id);
       });
-    ')"
+    ')" || {
+    recovery_note 'restart recovery skipped: the project list could not be read, or more than one project was running; start one from the phone'
+    recovery_projects=""
+  }
   if [[ -n "${recovery_projects}" ]]; then
-    curl --fail --silent --show-error --max-time 120 \
+    recovery_status="$(curl --silent --show-error --max-time 120 \
+      -o "${RUN_DIR}/recovery-response.json" -w '%{http_code}' \
       -X POST \
       -H 'X-Nautilus-Control: 1' \
       -H 'Content-Type: application/json' \
       --data '{}' \
-      "http://127.0.0.1:${CONTROL_PORT}/api/projects/${recovery_projects}/start" >/dev/null
-    printf 'Restarted recovered project %s after clean shadow validation\n' "${recovery_projects}" >>"${LOG_DIR}/server.log"
+      "http://127.0.0.1:${CONTROL_PORT}/api/projects/${recovery_projects}/start" || true)"
+    if [[ "${recovery_status}" == 200 ]]; then
+      printf 'Restarted recovered project %s after clean shadow validation\n' "${recovery_projects}" >>"${LOG_DIR}/server.log"
+    else
+      recovery_note "project ${recovery_projects} was running before the restart but did not start again (HTTP ${recovery_status:-none}: $(head -c 300 "${RUN_DIR}/recovery-response.json" 2>/dev/null)); the runner is up without it"
+    fi
   fi
 fi
 
