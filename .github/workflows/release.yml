@@ -1,0 +1,64 @@
+name: Release
+
+# Push a tag named after the desktop version (v0.1.0 for version 0.1.0) to
+# build the installers and attach them to a draft release. Publish the draft
+# from the Releases page once the files are checked.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  desktop:
+    strategy:
+      fail-fast: false
+      # Each platform builds on its own runner. The sync agent inside the app is
+      # a copy of the build machine's Node, so it cannot be cross-compiled.
+      # Ubuntu 22.04 keeps the AppImage and .deb on a glibc old enough for most
+      # current distributions.
+      matrix:
+        include:
+          - os: ubuntu-22.04
+          - os: macos-latest
+          - os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri -> target
+      - name: Install the Tauri system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      # A tag that does not match the app's version would publish installers
+      # whose names and About box disagree with the release.
+      - name: Check the tag matches the desktop version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          version="$(node -p 'require("./apps/desktop/package.json").version')"
+          [[ "${GITHUB_REF_NAME}" == "v${version}" ]] ||
+            { echo "tag ${GITHUB_REF_NAME} does not match desktop version ${version}"; exit 1; }
+      - run: pnpm install --frozen-lockfile
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: apps/desktop
+          tauriScript: pnpm tauri
+          tagName: v__VERSION__
+          releaseName: Nautilus v__VERSION__
+          releaseBody: See the installation notes in the README.
+          releaseDraft: true
+          prerelease: false
