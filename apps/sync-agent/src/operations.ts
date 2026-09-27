@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { loadStateProjects, type AgentConfig, type AgentProject } from "./config";
+import { GrantError } from "./grants";
 import { validateSyncRequest } from "./protocol";
 import {
   LockBusyError,
@@ -21,6 +22,7 @@ import type {
 } from "@nautilus/types";
 
 const responseVersion = 1 as const;
+const clockSkewMs = 60 * 1000;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -34,6 +36,8 @@ type AgentResponseInput = {
   applyToken?: string;
   error?: SyncResponse["error"];
 };
+
+type Authenticate = (request: SyncRequest) => void | Promise<void>;
 
 type CachedSyncResponse = {
   digest: string;
@@ -76,8 +80,12 @@ function errorResponse(
 
 export class SyncAgent {
   private readonly gitByProject = new Map<string, ShadowGit>();
+  private readonly usedNonces = new Set<string>();
 
-  constructor(private readonly config: AgentConfig) {}
+  constructor(
+    private readonly config: AgentConfig,
+    private readonly authenticateRequest: Authenticate,
+  ) {}
 
   private async projects(): Promise<AgentProject[]> {
     return this.config.statePath
@@ -116,8 +124,10 @@ export class SyncAgent {
       return await this.withLock(project, async () => {
         const cached = await this.cachedResponse(request, project);
         if (cached) {
+          await this.authenticate(request, true);
           return { ...cached, replayed: true };
         }
+        await this.authenticate(request);
         const result = await this.dispatch(request, project);
         await this.cacheResponse(request, result, project);
         if (result.status !== "ok") await this.recordFailure(request, project, result);
@@ -182,6 +192,47 @@ export class SyncAgent {
       status: "ok",
       history: await this.readEvents(project),
     });
+  }
+
+  private async authenticate(request: SyncRequest, allowReplay = false): Promise<void> {
+    const nowMs = Date.now();
+    const issued = Date.parse(request.issuedAt);
+    const expires = Date.parse(request.expiresAt);
+    if (
+      !Number.isFinite(issued) ||
+      !Number.isFinite(expires) ||
+      issued > nowMs + clockSkewMs ||
+      expires < nowMs - clockSkewMs ||
+      expires <= issued
+    ) {
+      throw new SyncAgentError(
+        "invalid",
+        "request_expired",
+        "Request timestamps are invalid or expired",
+      );
+    }
+    if (!allowReplay && this.usedNonces.has(request.nonce))
+      throw new SyncAgentError(
+        "invalid",
+        "request_replayed",
+        "Request nonce has already been used",
+      );
+    const project = (await this.projects()).find((entry) => entry.id === request.projectId);
+    if (!project)
+      throw new SyncAgentError("invalid", "project_not_configured", "Project is not configured");
+    try {
+      await this.authenticateRequest(request);
+    } catch (error) {
+      if (error instanceof GrantError)
+        throw new SyncAgentError("invalid", error.code, error.message);
+      throw error;
+    }
+    if (!allowReplay) {
+      this.usedNonces.add(request.nonce);
+      const path = join(this.projectDirectory(project, "transactions"), "nonces.json");
+      const nonces = await readJson<string[]>(path, []);
+      await writeJson(path, [...nonces.slice(-999), request.nonce]);
+    }
   }
 
   private async cachedResponse(
