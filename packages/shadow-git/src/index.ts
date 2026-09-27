@@ -1,6 +1,9 @@
 import { spawn } from "node:child_process";
-import { mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep, dirname } from "node:path";
+import { tmpdir } from "node:os";
+import type { SyncBundle } from "@nautilus/types";
 
 export { LockBusyError, pruneFiles, readJson, withLock, writeJson } from "./durable";
 
@@ -349,6 +352,20 @@ export class ShadowGit {
     }
   }
 
+  private async verifyBundle(path: string): Promise<void> {
+    try {
+      await this.git(["bundle", "verify", path]);
+    } catch (error) {
+      const message = error instanceof ShadowGitError ? error.message : String(error);
+      if (message.includes("lacks these prerequisite commits"))
+        throw new ShadowGitError(
+          "bundle_prerequisites_missing",
+          "Bundle requires commits this repository does not have",
+        );
+      throw error;
+    }
+  }
+
   async snapshot(message: string): Promise<string> {
     await this.baseline();
     await this.stage();
@@ -371,6 +388,66 @@ export class ShadowGit {
     return commit;
   }
 
+  async createBundle(
+    head: string,
+    directory: string,
+    baseHead: string | null,
+  ): Promise<SyncBundle> {
+    const path = join(directory, `${head}.bundle`);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+
+    const incremental =
+      baseHead !== null &&
+      commitPattern.test(baseHead) &&
+      baseHead !== head &&
+      (await this.isAncestor(baseHead, head));
+    const args = ["bundle", "create", path, headRef];
+    if (incremental) args.push(`^${baseHead}`);
+    await this.git(args);
+    await this.git(["bundle", "verify", path]);
+    const bytes = await readFile(path);
+    return {
+      bytes,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+      head,
+    };
+  }
+
+  async importBundle(bundle: SyncBundle, baseHead: string | null): Promise<string> {
+    if (bundle.bytes.length > this.limits.maxBundleBytes)
+      throw new ShadowGitError("bundle_too_large", "Bundle exceeds the configured size limit");
+    if (createHash("sha256").update(bundle.bytes).digest("hex") !== bundle.sha256)
+      throw new ShadowGitError("bundle_digest_mismatch", "Bundle digest does not match");
+    if (!commitPattern.test(bundle.head))
+      throw new ShadowGitError("invalid_bundle_head", "Bundle head is invalid");
+    const directory = await mkdtemp(join(tmpdir(), "nautilus-bundle-"));
+    const path = join(directory, "incoming.bundle");
+    try {
+      await writeFile(path, bundle.bytes, { mode: 0o600 });
+      await this.verifyBundle(path);
+      await this.git(["fetch", "--no-tags", path, headRef]);
+      const fetched = (await this.git(["rev-parse", "FETCH_HEAD"])).toString("utf8").trim();
+      if (fetched !== bundle.head)
+        throw new ShadowGitError(
+          "bundle_head_mismatch",
+          "Imported bundle did not produce the requested head",
+        );
+      await this.validateTree(bundle.head);
+      if (baseHead !== null && !(await this.isAncestor(baseHead, bundle.head)))
+        throw new ShadowGitError(
+          "invalid_bundle_ancestry",
+          "Bundle is not based on the synchronized base",
+        );
+      return bundle.head;
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+  async restoreHead(head: string): Promise<void> {
+    await this.git(["read-tree", "-u", "--reset", head]);
+    await this.git(["update-ref", headRef, head]);
+  }
+
   private async validateIndex(): Promise<void> {
     const entries = (await this.git(["ls-files", "-s", "-z"])).toString("utf8");
     for (const entry of entries.split("\0").filter(Boolean)) {
@@ -385,6 +462,32 @@ export class ShadowGit {
         throw new ShadowGitError(
           "unsupported_tree_mode",
           `Tree entry is not a regular file: ${path}`,
+        );
+    }
+  }
+
+  private async validateTree(head: string): Promise<void> {
+    const entries = (await this.git(["ls-tree", "-r", "-z", "--full-tree", head])).toString("utf8");
+    for (const entry of entries.split("\0").filter(Boolean)) {
+      const [metadata, path] = entry.split("\t", 2);
+      const mode = metadata?.split(" ", 1)[0];
+      if (mode === undefined || path === undefined)
+        throw new ShadowGitError("unsupported_tree_mode", "Tree entry could not be read");
+      const segments = path.split("/");
+      if (mode === "160000")
+        throw new ShadowGitError("submodule_rejected", `Submodule is not synchronizable: ${path}`);
+      if (mode !== "100644" && mode !== "100755")
+        throw new ShadowGitError(
+          "unsupported_tree_mode",
+          `Tree entry is not a regular file: ${path}`,
+        );
+      if (segments.at(-1) === ".gitmodules")
+        throw new ShadowGitError("gitmodules_rejected", ".gitmodules is not synchronizable");
+
+      if (segments.length > 1 && segments.slice(0, -1).includes(".git"))
+        throw new ShadowGitError(
+          "nested_git_rejected",
+          `Received Git metadata is not synchronizable: ${path}`,
         );
     }
   }
