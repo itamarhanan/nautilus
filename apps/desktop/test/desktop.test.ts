@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
+import type { SyncResponse } from "@nautilus/types";
 import { AgentProcess, agentExitMessage, createLaunchKey } from "../src/lib/agent";
 import { AgentApi, ApiError, ControlApi } from "../src/lib/api";
 import { ControlChannel } from "../src/lib/control";
@@ -33,6 +34,7 @@ import {
   withProject,
 } from "../src/lib/state";
 import { editablePath } from "../src/lib/editor";
+import { SyncSession } from "../src/lib/sync";
 
 const settings: DesktopSettings = {
   runnerUrl: "https://8080-studio.cloudspaces.litng.ai",
@@ -608,6 +610,99 @@ describe("control API", () => {
     await new AgentApi("http://127.0.0.1:4100", "launch-key").mintGrant("demo", "push");
     const [, init] = firstCall(fetchMock);
     expect(new Headers(init?.headers).get("authorization")).toBe("Bearer launch-key");
+  });
+});
+
+describe("sync session", () => {
+  function fakes(preview: SyncResponse | Error) {
+    const mocks = {
+      mintGrant: vi.fn().mockResolvedValue({
+        grant: "payload.sig",
+        claims: { grantId: "grant-1" },
+      }),
+      revokeGrant: vi.fn().mockResolvedValue(undefined),
+      tunnelHealth: vi.fn().mockResolvedValue(true),
+      syncPreview:
+        preview instanceof Error
+          ? vi.fn().mockRejectedValue(preview)
+          : vi.fn().mockResolvedValue(preview),
+      sync: vi.fn().mockResolvedValue({ version: 1, requestId: "r", status: "ok" }),
+    };
+    const agent = {
+      mintGrant: mocks.mintGrant,
+      revokeGrant: mocks.revokeGrant,
+    } as unknown as AgentApi;
+    const control = {
+      tunnelHealth: mocks.tunnelHealth,
+      syncPreview: mocks.syncPreview,
+      sync: mocks.sync,
+    } as unknown as ControlApi;
+    return { agent, control, mocks };
+  }
+
+  it("opens the reverse tunnel, forwards the grant, and cleans up", async () => {
+    const { agent, control, mocks } = fakes({
+      version: 1,
+      requestId: "preview-1",
+      status: "ok",
+    });
+    const { spawn, children } = fakeSpawner();
+    const session = new SyncSession({
+      projectId: "demo",
+      direction: "pull",
+      control,
+      agent,
+      settings,
+      home: "/home/me",
+      spawn,
+      localMode: false,
+    });
+    await session.preview();
+    expect(children[0]?.program).toBe("nautilus-ssh-sync");
+    expect(mocks.syncPreview).toHaveBeenCalledWith(
+      "demo",
+      "pull",
+      expect.objectContaining({ grant: "payload.sig" }),
+    );
+    await session.apply("preview-1");
+    expect(mocks.sync).toHaveBeenCalledWith(
+      "demo",
+      "pull",
+      expect.objectContaining({ grant: "payload.sig", requestId: "preview-1" }),
+    );
+    await session.close();
+    expect(mocks.revokeGrant).toHaveBeenCalledWith("grant-1");
+    expect(children[0]?.killed).toBe(true);
+  });
+
+  it("treats a 409 conflict as a result and still revokes on failure", async () => {
+    const conflict: SyncResponse = {
+      version: 1,
+      requestId: "r",
+      status: "conflict",
+      conflicts: [{ path: "a", reason: "content_conflict" }],
+    };
+    const conflicted = fakes(new ApiError("conflict", "Conflict", 409, [], conflict));
+    const local = {
+      projectId: "demo",
+      direction: "push" as const,
+      settings,
+      home: "/home/me",
+      spawn: fakeSpawner().spawn,
+      localMode: true,
+    };
+    const session = new SyncSession({
+      ...local,
+      agent: conflicted.agent,
+      control: conflicted.control,
+    });
+    expect((await session.preview()).status).toBe("conflict");
+
+    const { mocks: failingMocks, ...failing } = fakes(new Error("boom"));
+    const broken = new SyncSession({ ...local, ...failing });
+    await expect(broken.preview()).rejects.toThrow("boom");
+    await broken.close();
+    expect(failingMocks.revokeGrant).toHaveBeenCalledWith("grant-1");
   });
 });
 
