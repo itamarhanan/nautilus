@@ -45,6 +45,40 @@ importers:
         specifier: 5.0.2
         version: 5.0.2(@types/node@24.19.0)(vite@8.3.1(@types/node@24.19.0)(jiti@2.7.0)(tsx@4.19.4)(yaml@2.9.1))
 
+  apps/server:
+    dependencies:
+      '@nautilus/shadow-git':
+        specifier: workspace:*
+        version: link:../../packages/shadow-git
+      '@nautilus/types':
+        specifier: workspace:*
+        version: link:../../packages/types
+      '@opencode-ai/sdk':
+        specifier: 1.18.32
+        version: 1.18.32
+      http-proxy:
+        specifier: 1.18.1
+        version: 1.18.1
+      opencode-ai:
+        specifier: 1.18.32
+        version: 1.18.32
+    devDependencies:
+      '@types/http-proxy':
+        specifier: 1.17.16
+        version: 1.17.16
+      '@types/node':
+        specifier: 24.19.0
+        version: 24.19.0
+      tsdown:
+        specifier: 0.23.0
+        version: 0.23.0(oxc-resolver@11.24.2)(tsx@4.19.4)(typescript@5.9.3)
+      tsx:
+        specifier: 4.19.4
+        version: 4.19.4
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+
   apps/sync-agent:
     dependencies:
       '@nautilus/shadow-git':
@@ -401,6 +435,9 @@ packages:
   '@nodelib/fs.walk@1.2.8':
     resolution: {integrity: sha512-oGB+UxlgWcgQkgwo8GcEGwemoTFt3FIO9ababBmaGwXIoBKZ+GTy0pP185beGg7Llih/NSHSV2XAs1lnznocSg==}
     engines: {node: '>= 8'}
+
+  '@opencode-ai/sdk@1.18.32':
+    resolution: {integrity: sha512-Wi3WtH/cLA3C0ga05lyDb7zac+SzbST9MPwCve1Ffod0xwzHdy9G2gnxvMAR4RBRhKJS32Rgk2cR+fxBhAVSQw==}
 
   '@oxc-parser/binding-android-arm-eabi@0.150.0':
     resolution: {integrity: sha512-oQef2Zu4Prz1KLKznz3HqZzU9uVoA5PMoDZuuLmqms7hKmKSAPzlaMnLllJq3t+rgKmfJJ2siPrpZfFrW06btw==}
@@ -943,6 +980,9 @@ packages:
   '@types/estree@1.0.9':
     resolution: {integrity: sha512-GhdPgy1el4/ImP05X05Uw4cw2/M93BCUmnEvWZNStlCzEKME4Fkk+YpoA5OiHNQmoS7Cafb8Xa3Pya8m1Qrzeg==}
 
+  '@types/http-proxy@1.17.16':
+    resolution: {integrity: sha512-sdWoUajOB1cd0A8cRRQ1cfyWNbmFKLAqBB89Y8x5iYyG/mkJHc0YUH8pdWBy2omi9qtCpiIgGjuwO0dQST2l5w==}
+
   '@types/json-schema@7.0.15':
     resolution: {integrity: sha512-5+fP8P8MFNC+AyZCDxrB2pkZFPGzqQWUzpSeuuVLvm8VMcorNYavBqoFcxK8bQz4Qsbn4oUEEem4wDLfcysGHA==}
 
@@ -1278,6 +1318,9 @@ packages:
     resolution: {integrity: sha512-kVscqXk4OCp68SZ0dkgEKVi6/8ij300KBWTJq32P/dYeWTSwK41WyTxalN1eRmA5Z9UU/LX9D7FWSmV9SAYx6g==}
     engines: {node: '>=0.10.0'}
 
+  eventemitter3@4.0.7:
+    resolution: {integrity: sha512-8guHBZCwKnFhYdHr2ysuRWErTwhoN2X8XELRlrRwpmfeY2jjuUN4taQMsULKUVo1K4DvZl+0pgfyoysHxvmvEw==}
+
   expect-type@1.4.0:
     resolution: {integrity: sha512-KfYbmpRm0VbLjEvVa9yGwCi9GI34xvi7A/HXYWQO65CSD2u3MczUJSuwXKFIxlGsgBQizV9q5J9NHj4VG0n+pA==}
     engines: {node: '>=12.0.0'}
@@ -1327,6 +1370,15 @@ packages:
   flatted@3.4.4:
     resolution: {integrity: sha512-5+ybhBZANEJxaH3X5evAFatUxLfEHSr7n6kYJ+1Qd0mUqr4eu9gIf6GDbWHf8RJijHrjjO8G+la14SlL2SeS1Q==}
 
+  follow-redirects@1.16.0:
+    resolution: {integrity: sha512-y5rN/uOsadFT/JfYwhxRS5R7Qce+g3zG97+JrtFZlC9klX/W5hD7iiLzScI4nZqUS7DNUdhPgw4xI8W2LuXlUw==}
+    engines: {node: '>=4.0'}
+    peerDependencies:
+      debug: '*'
+    peerDependenciesMeta:
+      debug:
+        optional: true
+
   formatly@0.7.1:
     resolution: {integrity: sha512-ESuCEJE0SGgabl9q+zABI8LhJDmF+8nhpuqDzuM48HfJ9QTD5o6PqFJDFZY7w6f8xsh5lixuj5nJsQNvYOWvKQ==}
     engines: {node: '>=18.3.0'}
@@ -1368,6 +1420,10 @@ packages:
 
   hookified@2.2.0:
     resolution: {integrity: sha512-p/LgFzRN5FeoD3DLS6bkUapeye6E4SI6yJs6KetENd18S+FBthqYq2amJUWpt5z0EQwwHemidjY5OqJGEKm5uA==}
+
+  http-proxy@1.18.1:
+    resolution: {integrity: sha512-7mz/721AbnJwIVbnaSv1Cz3Am0ZLT/UBwkC92VlxhXv/k/BBQfM2fXElQNC27BVGr0uwUpplYPQM9LnaBMR5NQ==}
+    engines: {node: '>=8.0.0'}
 
   ignore@5.3.2:
     resolution: {integrity: sha512-hsBTNUqQTDwkWtcdYI2i06Y/nUBEsNEDJKjWdigLvegy8kDuJAS8uRlpkkcQpyEXL0Z/pjDy5HBmMjRCJ2gq+g==}
@@ -1530,6 +1586,72 @@ packages:
     resolution: {integrity: sha512-5vvB5+W7ePv+p3uqxi+RcW1XAzLW0/hxt3/4X4Lc4qHudzOhmBiBwOY6DRob4WnanAEGvNcLjF+KNOufrUoEQw==}
     engines: {node: '>=12.20.0'}
 
+  opencode-ai@1.18.32:
+    resolution: {integrity: sha512-SCrZWdq44y/EoH2+fE4HLcXS+DzpVqHPzmXk3p2RrufYy8LWvpfhRhKtijb5ktvx8r94ScqToqwHxR0BwS65OQ==}
+    cpu: [arm64, x64]
+    os: [darwin, linux, win32]
+    hasBin: true
+
+  opencode-darwin-arm64@1.18.32:
+    resolution: {integrity: sha512-sDsHk/A6FNqeN5NuAiII6AAhi4pJIFcIY0S2yjG9gToIIVaqrQRaHQ6g0kpoVqTiMci8tvaND6tWD4eDT3ahFw==}
+    cpu: [arm64]
+    os: [darwin]
+
+  opencode-darwin-x64-baseline@1.18.32:
+    resolution: {integrity: sha512-xXcVF+98Dk5bm3HXFu7R0xjc6zZSbC5LI7AcTWsnwFZIzOmYMjtCg0MwhEs/FPeMY6aGpl0n6IOS4WlQRXAAcw==}
+    cpu: [x64]
+    os: [darwin]
+
+  opencode-darwin-x64@1.18.32:
+    resolution: {integrity: sha512-ZO/4GTJV/q2jlZ8apN1OfgTdD4m9bkdgLsEWYYDK6O8eTljIFgwhRMrJw1ozucU/D6lLQsA3CX/sS56UtlsTjQ==}
+    cpu: [x64]
+    os: [darwin]
+
+  opencode-linux-arm64-musl@1.18.32:
+    resolution: {integrity: sha512-G0fHTfilpeJu5VyvBp0H2fl9KnHayePYEibMW1vC0455hQDny+VkFMRKpu6yLYzGbAfjeTqKtRkejrQJD4mLUQ==}
+    cpu: [arm64]
+    os: [linux]
+
+  opencode-linux-arm64@1.18.32:
+    resolution: {integrity: sha512-SDMw716oYxxJ9CWDO5roCpziw98ANwPZSz6L8evUOHkFCq6OU31xZGQwv/T1ROJnoPNJKWODmm1vzS6s6uEgUA==}
+    cpu: [arm64]
+    os: [linux]
+
+  opencode-linux-x64-baseline-musl@1.18.32:
+    resolution: {integrity: sha512-HGa9YBUBdc+qAyC9U8zXUht5qbTufOABOfSwmhukmzl9uMtuGoUovCzilwxytH0mTr/prUT/LAqWcXXoPXjRoA==}
+    cpu: [x64]
+    os: [linux]
+
+  opencode-linux-x64-baseline@1.18.32:
+    resolution: {integrity: sha512-XXO4htNdJEoj935NGMYNGjD1M8ZiJPo2u2cQzIyeBjinoClI7iXOHBPw+Twm/ZuzFHKtmI2594bt0GWIwTetkw==}
+    cpu: [x64]
+    os: [linux]
+
+  opencode-linux-x64-musl@1.18.32:
+    resolution: {integrity: sha512-ktS7x5Ms+sVMCAb2oRpPKGk10isRjHkwBz6ordNOlx0epx6JQPsTydzJmpLBSdsiFAkfmZoBiYayKDXXU+rwXA==}
+    cpu: [x64]
+    os: [linux]
+
+  opencode-linux-x64@1.18.32:
+    resolution: {integrity: sha512-CIatvoyi8V5a56xyw6ZUnsKxB9wqYIZqfNeqUNWhBBY4aENAm907LP0xXAwL6tR0cYbqNl2+Dvx8mOqXIxbDeQ==}
+    cpu: [x64]
+    os: [linux]
+
+  opencode-windows-arm64@1.18.32:
+    resolution: {integrity: sha512-AFXHn/kYnbsR/5N7Bm5ysv1vjDkQMaJQxPxJeF1OgGoQV48yBXPLIzhTijbt6IsipNBQxdb6xC0yANefpDSD9Q==}
+    cpu: [arm64]
+    os: [win32]
+
+  opencode-windows-x64-baseline@1.18.32:
+    resolution: {integrity: sha512-pXhJumlv2/g/ubgbfW5VtCnLEfdXw2RZO0j1uVhYVtCCYNjioJUPeLT1oMRF06VbkCo1UuLRfwEFqeFXD59N+A==}
+    cpu: [x64]
+    os: [win32]
+
+  opencode-windows-x64@1.18.32:
+    resolution: {integrity: sha512-9uy0owugtP9nkuylzN9+O9zWUIxt4X+KYwsREVk4G27PCfxccj+xIT7yxO9hCVtrF+DVgiJ59xDpiANE9UZrrQ==}
+    cpu: [x64]
+    os: [win32]
+
   optionator@0.9.4:
     resolution: {integrity: sha512-6IpQ7mKUxRcZNLIObR0hz7lxsapSSIYNZJwXPGeF0mTVqGKFIXj1DQcMoT22S3ROcLyY/rz0PWaWZ9ayWmad9g==}
     engines: {node: '>= 0.8.0'}
@@ -1605,6 +1727,9 @@ packages:
 
   queue-microtask@1.2.3:
     resolution: {integrity: sha512-NuaNSa6flKT5JaSYQzJok04JzTL1CA6aGhv5rfLW3PgqA+M2ChpZQnAC8h8i4ZFkBS8X5RqkDBHA7r4hej3K9A==}
+
+  requires-port@1.0.0:
+    resolution: {integrity: sha512-KigOCHcocU3XODJxsu8i/j8T9tzT4adHiecwORRQ0ZZFcp7ahwXuRU1m+yuO90C5ZUyGeGfocHDI14M3L3yDAQ==}
 
   resolve-pkg-maps@1.0.0:
     resolution: {integrity: sha512-seS2Tj26TBVOC2NIc2rOe2y2ZO7efxITtLZcGSOnHHNOQ7CkiUBfw0Iw2ck6xkIhPwLhKNLS8BO+hEpngQlqzw==}
@@ -2113,6 +2238,10 @@ snapshots:
       '@nodelib/fs.scandir': 2.1.5
       fastq: 1.20.3
 
+  '@opencode-ai/sdk@1.18.32':
+    dependencies:
+      cross-spawn: 7.0.6
+
   '@oxc-parser/binding-android-arm-eabi@0.150.0':
     optional: true
 
@@ -2424,6 +2553,10 @@ snapshots:
 
   '@types/estree@1.0.9': {}
 
+  '@types/http-proxy@1.17.16':
+    dependencies:
+      '@types/node': 24.19.0
+
   '@types/json-schema@7.0.15': {}
 
   '@types/node@24.19.0':
@@ -2695,7 +2828,6 @@ snapshots:
       '@esbuild/win32-arm64': 0.25.12
       '@esbuild/win32-ia32': 0.25.12
       '@esbuild/win32-x64': 0.25.12
-    optional: true
 
   escape-string-regexp@4.0.0: {}
 
@@ -2769,6 +2901,8 @@ snapshots:
 
   esutils@2.0.3: {}
 
+  eventemitter3@4.0.7: {}
+
   expect-type@1.4.0: {}
 
   fast-deep-equal@3.1.3: {}
@@ -2818,6 +2952,8 @@ snapshots:
 
   flatted@3.4.4: {}
 
+  follow-redirects@1.16.0: {}
+
   formatly@0.7.1:
     dependencies:
       fd-package-json: 2.0.0
@@ -2853,6 +2989,14 @@ snapshots:
   hookified@1.15.1: {}
 
   hookified@2.2.0: {}
+
+  http-proxy@1.18.1:
+    dependencies:
+      eventemitter3: 4.0.7
+      follow-redirects: 1.16.0
+      requires-port: 1.0.0
+    transitivePeerDependencies:
+      - debug
 
   ignore@5.3.2: {}
 
@@ -2981,6 +3125,57 @@ snapshots:
 
   obug@3.0.0: {}
 
+  opencode-ai@1.18.32:
+    optionalDependencies:
+      opencode-darwin-arm64: 1.18.32
+      opencode-darwin-x64: 1.18.32
+      opencode-darwin-x64-baseline: 1.18.32
+      opencode-linux-arm64: 1.18.32
+      opencode-linux-arm64-musl: 1.18.32
+      opencode-linux-x64: 1.18.32
+      opencode-linux-x64-baseline: 1.18.32
+      opencode-linux-x64-baseline-musl: 1.18.32
+      opencode-linux-x64-musl: 1.18.32
+      opencode-windows-arm64: 1.18.32
+      opencode-windows-x64: 1.18.32
+      opencode-windows-x64-baseline: 1.18.32
+
+  opencode-darwin-arm64@1.18.32:
+    optional: true
+
+  opencode-darwin-x64-baseline@1.18.32:
+    optional: true
+
+  opencode-darwin-x64@1.18.32:
+    optional: true
+
+  opencode-linux-arm64-musl@1.18.32:
+    optional: true
+
+  opencode-linux-arm64@1.18.32:
+    optional: true
+
+  opencode-linux-x64-baseline-musl@1.18.32:
+    optional: true
+
+  opencode-linux-x64-baseline@1.18.32:
+    optional: true
+
+  opencode-linux-x64-musl@1.18.32:
+    optional: true
+
+  opencode-linux-x64@1.18.32:
+    optional: true
+
+  opencode-windows-arm64@1.18.32:
+    optional: true
+
+  opencode-windows-x64-baseline@1.18.32:
+    optional: true
+
+  opencode-windows-x64@1.18.32:
+    optional: true
+
   optionator@0.9.4:
     dependencies:
       deep-is: 0.1.4
@@ -3097,6 +3292,8 @@ snapshots:
   quansync@1.0.0: {}
 
   queue-microtask@1.2.3: {}
+
+  requires-port@1.0.0: {}
 
   resolve-pkg-maps@1.0.0: {}
 
@@ -3215,7 +3412,6 @@ snapshots:
       get-tsconfig: 4.14.3
     optionalDependencies:
       fsevents: 2.3.3
-    optional: true
 
   turbo@2.11.4:
     optionalDependencies:

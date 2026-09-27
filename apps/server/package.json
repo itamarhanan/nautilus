@@ -1,0 +1,28 @@
+{
+  "name": "@nautilus/server",
+  "version": "0.0.0",
+  "private": true,
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "build": "tsdown",
+    "dev": "tsx watch src/main.ts",
+    "dev:local": "tsx watch src/main.ts",
+    "start": "node dist/main.js",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@nautilus/shadow-git": "workspace:*",
+    "@nautilus/types": "workspace:*",
+    "@opencode-ai/sdk": "1.18.32",
+    "http-proxy": "1.18.1",
+    "opencode-ai": "1.18.32"
+  },
+  "devDependencies": {
+    "@types/http-proxy": "1.17.16",
+    "@types/node": "24.19.0",
+    "tsdown": "0.23.0",
+    "tsx": "4.19.4",
+    "typescript": "5.9.3"
+  }
+}
