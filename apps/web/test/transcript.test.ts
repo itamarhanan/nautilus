@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { SessionEvent } from "@nautilus/types";
-import { buildTranscript, currentActivity } from "@/lib/transcript";
+import {
+  buildTranscript,
+  currentActivity,
+  latestTodos,
+  subagentsOf,
+  threadEvents,
+} from "@/lib/transcript";
 
 let sequence = 0;
 function event(type: SessionEvent["type"], payload: Record<string, unknown>): SessionEvent {
@@ -170,5 +176,108 @@ describe("live turn", () => {
       }),
     ]);
     expect(currentActivity(items)).toBe("Running bash: pnpm test");
+  });
+});
+
+describe("notices", () => {
+  it("shows a stopped turn once and not as a failure", () => {
+    const items = buildTranscript([
+      event("session.message", { message: { role: "user", text: "Explore" } }),
+      event("session.message", {
+        message: {
+          id: "a3",
+          role: "assistant",
+          error: { name: "MessageAbortedError" },
+        },
+      }),
+      event("session.message", {
+        part: { id: "t3", messageID: "a3", type: "text", text: "On it" },
+      }),
+      event("session.interrupted", { reason: "user" }),
+      event("session.checkpoint", { commit: "4dc7ebe0" }),
+      event("session.interrupted", { error: { name: "MessageAbortedError" } }),
+      event("session.checkpoint", { commit: "4dc7ebe0" }),
+    ]);
+    const assistant = items.find((item) => item.kind === "assistant");
+    expect(assistant?.kind === "assistant" && assistant.error).toBeNull();
+    expect(items.filter((item) => item.kind === "notice").map((item) => item.text)).toEqual([
+      "Turn interrupted",
+      "Checkpoint 4dc7ebe",
+    ]);
+  });
+});
+
+describe("subagents and todos", () => {
+  const task = (status: string) =>
+    event("session.tool", {
+      part: {
+        id: "task-1",
+        messageID: "a1",
+        type: "tool",
+        tool: "task",
+        state: {
+          status,
+          title: "Explore the server",
+          input: {
+            description: "Explore",
+            prompt: "Read src/",
+            subagent_type: "explore",
+          },
+          metadata: { sessionId: "child-1" },
+        },
+      },
+    });
+  const childText = event("session.message", {
+    subagent: "child-1",
+    part: { id: "c1", messageID: "cm1", type: "text", text: "Reading files" },
+  });
+
+  it("keeps a subagent's events out of the main thread and in its own", () => {
+    const events = [task("running"), childText];
+    const main = buildTranscript(threadEvents(events, null));
+    expect(main).toHaveLength(1);
+    expect(main[0]?.kind === "assistant" && main[0].parts[0]?.kind).toBe("tool");
+    const child = buildTranscript(threadEvents(events, "child-1"));
+    expect(child.map((item) => item.kind === "assistant" && item.parts[0]?.kind)).toEqual(["text"]);
+    expect(currentActivity(main)).toBe("Waiting on Explore the server");
+  });
+
+  it("lists subagents with their brief and status, and settles them when the turn ends", () => {
+    expect(subagentsOf([task("running"), childText])).toEqual([
+      {
+        id: "child-1",
+        title: "Explore the server",
+        agentType: "explore",
+        prompt: "Read src/",
+        status: "running",
+        error: null,
+      },
+    ]);
+    const stopped = subagentsOf([task("running"), event("session.interrupted", {})]);
+    expect(stopped[0]?.status).toBe("error");
+    expect(subagentsOf([task("completed")])[0]?.status).toBe("complete");
+  });
+
+  it("reads the main agent's latest todo list and ignores a subagent's", () => {
+    const todos = latestTodos([
+      event("session.todo", {
+        todos: [{ id: "1", content: "Old", status: "pending" }],
+      }),
+      event("session.todo", {
+        todos: [
+          { id: "1", content: "Plan", status: "completed", priority: "high" },
+          { id: "2", content: "Build", status: "in_progress" },
+          { id: "3", status: "pending" },
+        ],
+      }),
+      event("session.todo", {
+        subagent: "child-1",
+        todos: [{ id: "9", content: "Sub", status: "pending" }],
+      }),
+    ]);
+    expect(todos).toEqual([
+      { id: "1", content: "Plan", status: "completed", priority: "high" },
+      { id: "2", content: "Build", status: "in_progress", priority: "medium" },
+    ]);
   });
 });
