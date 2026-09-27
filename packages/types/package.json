@@ -1,0 +1,25 @@
+{
+  "name": "@nautilus/types",
+  "version": "0.0.0",
+  "private": true,
+  "license": "GPL-3.0-only",
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsdown",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.0",
+    "tsdown": "0.23.0",
+    "typescript": "5.9.3"
+  }
+}
