@@ -1,4 +1,4 @@
-import { parseResolutions, type SyncResponse } from "@nautilus/types";
+import { parseResolutions, type SyncEvent, type SyncResponse } from "@nautilus/types";
 import { HttpError } from "../errors";
 import { readJson, requestGrant, requestIdValue } from "../http/body";
 import { sendJson } from "../http/respond";
@@ -21,6 +21,30 @@ function syncHttpStatus(result: SyncResponse): number {
   }
 }
 
+// A phone reads the history too. The events hold no grants or bundles, but
+// events.json is read back as written, so only the known fields go out.
+function deviceSyncEvent(event: SyncEvent): SyncEvent {
+  return {
+    requestId: event.requestId,
+    projectId: event.projectId,
+    direction: event.direction,
+    status: event.status,
+    baseHead: event.baseHead,
+    localHead: event.localHead,
+    remoteHead: event.remoteHead,
+    errorCode: event.errorCode,
+    conflicts: event.conflicts.map(({ path, reason, pc, runner }) => ({
+      path,
+      reason,
+      ...(pc ? { pc } : {}),
+      ...(runner ? { runner } : {}),
+    })),
+    createdAt: event.createdAt,
+    committedAt: event.committedAt,
+    ...(event.undone ? { undone: true } : {}),
+  };
+}
+
 function direction(value: unknown): "pull" | "push" {
   if (value !== "pull" && value !== "push") {
     throw new HttpError(400, "invalid_sync_direction", "direction must be pull or push");
@@ -33,11 +57,11 @@ export function syncRoutes(context: AppContext): Route[] {
     {
       method: "GET",
       path: "/api/projects/:projectId/sync-history",
-      access: "admin",
-      handle: async ({ response, params }) => {
+      handle: async ({ response, params, principal }) => {
         const project = requireProject(context, params.projectId);
+        const events = await requireSync(context).history(project.id);
         sendJson(response, 200, {
-          events: await requireSync(context).history(project.id),
+          events: principal?.kind === "admin" ? events : events.map(deviceSyncEvent),
         });
         return 200;
       },
