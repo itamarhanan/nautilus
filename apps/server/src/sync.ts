@@ -311,7 +311,7 @@ export class SyncCoordinator {
           head: remoteHead,
           baseHead: synchronizedBase,
           dirty: !(await git.isClean()),
-          changes: diff,
+          changes: { files: [], additions: 0, deletions: 0 },
           excludedRepositories: await git.excludedRepositories(),
         },
         diff,
@@ -378,7 +378,7 @@ export class SyncCoordinator {
     const local = await this.options.client.request("preview", projectId, {
       grant,
       requestId: `${requestId}-preview`,
-      payload: { runnerBase: await this.base(projectId) },
+      payload: { runnerBase: await this.base(projectId), includeDiff: false },
     });
 
     if (local.status !== "ok") return { ...local, requestId };
