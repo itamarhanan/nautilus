@@ -17,7 +17,8 @@
     "dev": {
       "cache": false,
       "persistent": true,
-      "dependsOn": ["^build"]
+      "dependsOn": ["^build"],
+      "passThroughEnv": ["PORT"]
     },
     "dev:local": {
       "cache": false,
