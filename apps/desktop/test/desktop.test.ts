@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { brand } from "@nautilus/brand";
 import type { SyncFileChange, SyncResponse } from "@nautilus/types";
 import { diffDisplay } from "../src/lib/diff";
-import { AgentProcess, agentExitMessage, createLaunchKey } from "../src/lib/agent";
+import { AgentProcess, agentExitMessage, createLaunchKey, runnerKey } from "../src/lib/agent";
 import { AgentApi, ApiError, ControlApi } from "../src/lib/api";
 import { ControlChannel } from "../src/lib/control";
 import { friendlyError } from "../src/lib/errors";
@@ -72,6 +72,7 @@ type FakeChild = {
   handlers: SpawnHandlers;
   written: string[];
   killed: boolean;
+  env?: Record<string, string> | undefined;
 };
 
 function fakeSpawner(behave: (child: FakeChild) => void = () => undefined): {
@@ -79,13 +80,14 @@ function fakeSpawner(behave: (child: FakeChild) => void = () => undefined): {
   children: FakeChild[];
 } {
   const children: FakeChild[] = [];
-  const spawn: Spawner = (program, args, handlers) => {
+  const spawn: Spawner = (program, args, handlers, options) => {
     const child: FakeChild = {
       program,
       args,
       handlers,
       written: [],
       killed: false,
+      env: options?.env,
     };
     children.push(child);
     const running: RunningProcess = {
@@ -560,6 +562,41 @@ describe("sync agent process", () => {
     expect(stored).toBeNull();
   });
 
+  it("names each runner with a stable key and restarts for a new one", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(() => Promise.resolve(jsonResponse({ ok: true }))),
+    );
+    expect(await runnerKey(settings, true)).toBe("local");
+    expect(await runnerKey({ ...settings, runnerUrl: "" }, false)).toBe("unset");
+    const production = await runnerKey(settings, false);
+    expect(production).toMatch(/^runner-[0-9a-f]{16}$/);
+    expect(
+      await runnerKey(
+        { ...settings, runnerUrl: "HTTPS://8080-studio.cloudspaces.litng.ai/" },
+        false,
+      ),
+    ).toBe(production);
+    expect(
+      await runnerKey({ ...settings, runnerUrl: "https://8080-other.cloudspaces.litng.ai" }, false),
+    ).not.toBe(production);
+
+    const { spawn, children } = fakeSpawner((child) => {
+      child.handlers.onStdout?.('{"event":"ready","port":4100}');
+    });
+    const agent = new AgentProcess({ spawn });
+    await agent.start("local");
+    await agent.start("local");
+    expect(children).toHaveLength(1);
+    expect(children[0]?.env).toEqual({ NAUTILUS_AGENT_RUNNER: "local" });
+    await agent.start(production);
+    expect(children).toHaveLength(2);
+    expect(children[0]?.killed).toBe(true);
+    expect(children[1]?.env).toEqual({ NAUTILUS_AGENT_RUNNER: production });
+    expect(agent.runnerKey).toBe(production);
+    expect(agent.current.phase).toBe("running");
+  });
+
   it("explains a taken port", () => {
     expect(
       agentExitMessage(1, "Error: listen EADDRINUSE: address already in use 127.0.0.1:4100"),
@@ -603,6 +640,41 @@ describe("control API", () => {
       requestId: "req-12345678",
     });
     expect(new Headers(init?.headers).get("authorization")).toBeNull();
+  });
+
+  it("gives up on a delete the runner never answers, and says the project was kept", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(
+          (_input: unknown, init?: RequestInit) =>
+            new Promise<Response>((_resolve, reject) => {
+              init?.signal?.addEventListener("abort", () => {
+                reject(new Error("aborted"));
+              });
+            }),
+        ),
+      );
+      const outcome = new ControlApi("http://127.0.0.1:47001")
+        .deleteProject("demo")
+        .catch((caught: unknown) => caught);
+      await vi.advanceTimersByTimeAsync(60_000);
+      const error = await outcome;
+      expect(error).toBeInstanceOf(ApiError);
+      expect((error as ApiError).message).toBe(
+        "The runner did not answer. The project was not removed there.",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("accepts an empty 204 from a delete", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 204 })));
+    await expect(
+      new ControlApi("http://127.0.0.1:47001").deleteProject("demo"),
+    ).resolves.toBeUndefined();
   });
 
   it("authenticates agent calls with the launch key", async () => {
@@ -749,6 +821,7 @@ describe("desktop store", () => {
         api: control,
         retryAt: null,
       },
+      refreshInfo: vi.fn().mockResolvedValue(undefined),
       subscribe: vi.fn((listener: (snapshot: unknown) => void) => {
         listener({
           phase: "connected",
@@ -818,6 +891,7 @@ describe("desktop store", () => {
       value,
       control,
       channel,
+      agent,
       agentClient,
       saveSettingsMock,
       savedState: () => savedState,
@@ -1208,6 +1282,117 @@ describe("desktop store", () => {
     expect(store.getState().selectedProjectId).toBe("blog");
   });
 
+  it("forgets a removed project everywhere at once, before state.json is written", async () => {
+    let finishSave: () => void = () => undefined;
+    const saveState = vi.fn().mockResolvedValue(undefined);
+    const { value, control } = services({
+      loadState: () => Promise.resolve(twoProjects),
+      saveState,
+    });
+    const registered = (ids: string[]) =>
+      ids.map((id) => ({ id, name: id, state: "inactive" as const }));
+    control.projects.mockResolvedValue(registered(["shop", "blog"]));
+    Object.assign(control, { deleteProject: vi.fn().mockResolvedValue(undefined) });
+    const store = createDesktopStore(value);
+    await store.getState().init();
+    await store.getState().refreshRunner();
+    store.getState().selectProject("shop", "settings");
+    await Promise.resolve();
+    const saves = saveState.mock.calls.length;
+
+    control.projects.mockResolvedValue(registered(["blog"]));
+    saveState.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishSave = resolve;
+        }),
+    );
+    const removal = store.getState().removeProject("shop");
+    await vi.waitFor(() => {
+      expect(saveState).toHaveBeenCalledTimes(saves + 1);
+    });
+
+    // The disk write is still in flight. Nothing may still point at "shop", or
+    // the next status poll asks the runner about a project it just deleted.
+    const state = store.getState();
+    expect(state.appState.projects.map((project) => project.id)).toEqual(["blog"]);
+    expect(state.projects.map((project) => project.id)).toEqual(["blog"]);
+    expect(state.selectedProjectId).toBe("blog");
+    expect(state.route).toEqual({ name: "home" });
+    expect(state.status.shop).toBeUndefined();
+    control.syncStatus.mockClear();
+    await store.getState().refreshStatus(state.selectedProjectId ?? undefined);
+    await store.getState().refreshStatus();
+    expect(control.syncStatus).not.toHaveBeenCalledWith("shop");
+
+    finishSave();
+    await expect(removal).resolves.toBeNull();
+  });
+
+  it("keeps a project the runner refuses to remove and hands back the runner's reason", async () => {
+    const { value, control } = services({
+      loadState: () => Promise.resolve(twoProjects),
+    });
+    control.projects.mockResolvedValue([{ id: "shop", name: "shop", state: "idle" }]);
+    Object.assign(control, {
+      deleteProject: vi
+        .fn()
+        .mockRejectedValueOnce(
+          new ApiError("project_busy", "A sync is in progress. Try again when it finishes.", 409),
+        )
+        .mockRejectedValueOnce(new ApiError("project_not_found", "Project not found", 404)),
+    });
+    const store = createDesktopStore(value);
+    await store.getState().init();
+    await store.getState().refreshRunner();
+    const saves = vi.mocked(value.saveState).mock.calls.length;
+
+    expect(await store.getState().removeProject("shop")).toMatch(/sync is in progress/);
+    expect(store.getState().appState.projects.map((project) => project.id)).toEqual([
+      "shop",
+      "blog",
+    ]);
+    expect(store.getState().projects.map((project) => project.id)).toEqual(["shop"]);
+    expect(vi.mocked(value.saveState).mock.calls.length).toBe(saves);
+
+    // The runner no longer has it, which is what removing wanted.
+    expect(await store.getState().removeProject("shop")).toBeNull();
+    expect(store.getState().appState.projects.map((project) => project.id)).toEqual(["blog"]);
+  });
+
+  it("removes a project that only the runner has, and leaves this PC's state alone", async () => {
+    const { value, control } = services({
+      loadState: () => Promise.resolve(twoProjects),
+    });
+    control.projects
+      .mockResolvedValueOnce([
+        { id: "shop", name: "shop", state: "idle" },
+        { id: "demo", name: "Demo", state: "unhealthy" },
+      ])
+      .mockResolvedValue([{ id: "shop", name: "shop", state: "idle" }]);
+    const deleteProject = vi.fn().mockResolvedValue(undefined);
+    Object.assign(control, { deleteProject });
+    const store = createDesktopStore(value);
+    await store.getState().init();
+    await store.getState().refreshRunner();
+    store.getState().selectProject("blog");
+    const before = store.getState();
+    const saves = vi.mocked(value.saveState).mock.calls.length;
+
+    expect(await store.getState().removeProject("demo")).toBeNull();
+    expect(deleteProject).toHaveBeenCalledWith("demo");
+    await vi.waitFor(() => {
+      expect(control.projects).toHaveBeenCalledTimes(2);
+    });
+    const after = store.getState();
+    expect(after.projects.map((project) => project.id)).toEqual(["shop"]);
+    expect(after.appState).toBe(before.appState);
+    expect(after.selectedProjectId).toBe("blog");
+    expect(after.route).toEqual({ name: "project", tab: "overview" });
+    expect(vi.mocked(value.saveState).mock.calls.length).toBe(saves);
+    expect(after.notices.at(-1)).toMatchObject({ title: "Removed Demo from the runner" });
+  });
+
   it("saves a project edit to state.json only once the runner accepts it", async () => {
     const { value, control, savedState } = services({
       loadState: () => Promise.resolve(twoProjects),
@@ -1250,6 +1435,45 @@ describe("desktop store", () => {
       expect(store.getState().pairing?.code).toBe("ABCD2345");
     });
     expect(store.getState().pairing?.url).toBe("http://127.0.0.1:3000/?pair=ABCD2345");
+  });
+
+  it("restarts the agent for a new runner and closes the open review", async () => {
+    const { value, agent } = services({ localMode: false });
+    const store = createDesktopStore(value);
+    await store.getState().init();
+    await vi.waitFor(() => {
+      expect(agent.start).toHaveBeenCalledWith(expect.stringMatching(/^runner-[0-9a-f]{16}$/));
+    });
+    const first = String(agent.start.mock.calls[0]?.[0]);
+    Object.assign(agent, { runnerKey: first });
+    store.setState({
+      review: {
+        id: 1,
+        projectId: "shop",
+        direction: "push",
+        phase: "ready",
+        step: null,
+        preview: null,
+        result: null,
+        error: null,
+        resolutions: {},
+        background: false,
+      },
+    });
+    expect(await store.getState().saveSettings({ ...settings, projectRoots: ["~/other"] })).toBe(
+      null,
+    );
+    expect(agent.start).toHaveBeenCalledTimes(1);
+    expect(store.getState().review).not.toBeNull();
+
+    const next = { ...settings, runnerUrl: "https://8080-other.cloudspaces.litng.ai" };
+    expect(await store.getState().saveSettings(next)).toBe(null);
+    await vi.waitFor(() => {
+      expect(agent.start).toHaveBeenCalledTimes(2);
+    });
+    expect(agent.start.mock.calls[1]?.[0]).toMatch(/^runner-[0-9a-f]{16}$/);
+    expect(agent.start.mock.calls[1]?.[0]).not.toBe(first);
+    expect(store.getState().review).toBeNull();
   });
 
   it("does not save settings that fail to connect", async () => {
