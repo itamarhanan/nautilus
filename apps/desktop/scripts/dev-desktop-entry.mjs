@@ -7,7 +7,7 @@ if (platform() === "linux") {
   const tauri = resolve(dirname(fileURLToPath(import.meta.url)), "../src-tauri");
   const binary = "nautilus-desktop";
   const dataHome = process.env.XDG_DATA_HOME || join(homedir(), ".local/share");
-  const file = join(dataHome, "applications", `${binary}.desktop`);
+  const file = join(dataHome, "applications", `${binary}-dev.desktop`);
   const entry = [
     "[Desktop Entry]",
     "Type=Application",
