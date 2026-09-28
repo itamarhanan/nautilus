@@ -203,6 +203,14 @@ export const review = {
   chooseFiles: (count: number) => `Choose ${String(count)} file${count === 1 ? "" : "s"}`,
   willChange: (count: number, side: string, summary: string) =>
     `${String(count)} file${count === 1 ? "" : "s"} will change on ${side}${summary}.`,
+  firstSync: {
+    push: (count: number) =>
+      `First push to this runner. It sends the whole project (${String(count)} file${count === 1 ? "" : "s"}).`,
+    pull: (count: number) =>
+      `First pull from this runner. It brings the whole project (${String(count)} file${count === 1 ? "" : "s"}).`,
+  },
+  firstSyncNote:
+    "This runner has no earlier sync of this project to compare with, so every file shows as added.",
   failed: (verb: string) => `${verb} failed`,
   blocked: (verb: string) => `${verb} blocked`,
   done: (verb: string, count: number, side: string) =>
