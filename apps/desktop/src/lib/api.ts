@@ -37,6 +37,8 @@ export class ApiError extends Error {
 type RequestOptions = {
   signal?: AbortSignal;
   timeoutMs?: number;
+
+  timeoutMessage?: string;
 };
 
 type SyncOptions = RequestOptions & {
@@ -132,6 +134,7 @@ async function requestJson<T>(
   };
   options.signal?.addEventListener("abort", abort, { once: true });
   let response: Response;
+  let text: string;
   try {
     response = await httpFetch(url, {
       method,
@@ -143,14 +146,19 @@ async function requestJson<T>(
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: controller.signal,
     });
+    // The body is read under the same timeout, so a response whose headers
+    // arrived but whose body never ends cannot leave the caller waiting.
+    text = await response.text();
   } catch {
     if (options.signal?.aborted) throw new ApiError("cancelled", "Cancelled", 0);
+    if (controller.signal.aborted && options.timeoutMessage) {
+      throw new ApiError("timeout", options.timeoutMessage, 0);
+    }
     throw new ApiError(offlineCode, "Not reachable", 0);
   } finally {
     clearTimeout(timeout);
     options.signal?.removeEventListener("abort", abort);
   }
-  const text = await response.text();
   let value: unknown;
   if (text) {
     try {
@@ -193,7 +201,12 @@ export class ControlApi {
   }
 
   async deleteProject(projectId: string): Promise<void> {
-    await this.request("DELETE", `/api/projects/${encodeURIComponent(projectId)}`);
+    // Deleting cleans up the project's folders and shadow repository on the
+    // runner, which can take a few seconds.
+    await this.request("DELETE", `/api/projects/${encodeURIComponent(projectId)}`, undefined, {
+      timeoutMs: 60_000,
+      timeoutMessage: "The runner did not answer. The project was not removed there.",
+    });
   }
 
   pairingCode(deviceName = "Phone"): Promise<PairingCodeResponse> {

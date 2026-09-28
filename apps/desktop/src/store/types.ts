@@ -122,7 +122,7 @@ export type DesktopActions = {
     projectId: string,
     changes: { name: string; devCommand: string },
   ) => Promise<string | null>;
-  removeProject: (projectId: string) => Promise<void>;
+  removeProject: (projectId: string) => Promise<string | null>;
   reregisterProject: (projectId: string) => Promise<void>;
   touchFolder: (path: string) => void;
   newPairingCode: () => Promise<void>;

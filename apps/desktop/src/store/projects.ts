@@ -7,6 +7,13 @@ import { type DesktopActions, homeRoute } from "./types";
 
 const scanMaxAgeMs = 5 * 60 * 1000;
 
+function withoutKey<T>(
+  record: Partial<Record<string, T>>,
+  key: string,
+): Partial<Record<string, T>> {
+  return Object.fromEntries(Object.entries(record).filter(([id]) => id !== key));
+}
+
 export function projectsSlice(
   runtime: StoreRuntime,
 ): Pick<
@@ -116,33 +123,67 @@ export function projectsSlice(
 
     removeProject: async (projectId) => {
       const api = control();
+      const local = get().appState.projects.find((project) => project.id === projectId);
+      const name = local?.name ?? get().projects.find((project) => project.id === projectId)?.name;
+      if (!local && !api) return "Connect to the runner first.";
       if (api) {
         try {
           await api.deleteProject(projectId);
         } catch (error) {
           if (!(error instanceof ApiError && error.status === 404)) {
-            get().notify({
-              tone: "error",
-              title: "Could not remove the project",
-              body: messageOf(error, ""),
-            });
-            return;
+            return messageOf(error, "Could not remove the project");
           }
         }
       }
-      const next = withoutProject(get().appState, projectId);
-      await persistState(next);
+
+      // Every field that points at the project changes in one update, before
+      // the disk write, so no render or status poll sees the project gone from
+      // state.json while the selection, the route or the runner list still
+      // name it.
+      const { appState, status, history } = get();
+      const next = local ? withoutProject(appState, projectId) : appState;
       set({
+        appState: next,
         projects: get().projects.filter((project) => project.id !== projectId),
-        selectedProjectId: next.projects.at(0)?.id ?? null,
-        route: homeRoute,
-        settingsReturn: homeRoute,
+        status: withoutKey(status, projectId),
+        history: withoutKey(history, projectId),
+        ...(local
+          ? {
+              selectedProjectId: next.projects.at(0)?.id ?? null,
+              route: homeRoute,
+              settingsReturn: homeRoute,
+            }
+          : {}),
       });
-      get().notify({
-        tone: "info",
-        title: "Project removed",
-        body: "Its folder stays in Recent.",
-      });
+      if (api) {
+        void api
+          .projects()
+          .then((projects) => {
+            set({ projects });
+          })
+          .catch(() => undefined);
+      }
+      get().notify(
+        local
+          ? { tone: "info", title: "Project removed", body: "Its folder stays in Recent." }
+          : {
+              tone: "info",
+              title: `Removed ${name ?? projectId} from the runner`,
+              body: "Nothing on this PC changed.",
+            },
+      );
+      if (local) {
+        try {
+          await persistState(next);
+        } catch (error) {
+          get().notify({
+            tone: "error",
+            title: "Could not save ~/.nautilus/state.json",
+            body: messageOf(error, "The project may come back after a restart."),
+          });
+        }
+      }
+      return null;
     },
 
     reregisterProject: async (projectId) => {

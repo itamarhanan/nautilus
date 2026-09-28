@@ -92,6 +92,8 @@ export function runnerSlice(
             api && registered ? api.syncStatus(id) : Promise.resolve(null),
             agent ? agent.status(id) : Promise.resolve(null),
           ]);
+          // A project removed while its status was loading stays removed.
+          if (!get().appState.projects.some((project) => project.id === id)) return;
           const error =
             runner.status === "rejected"
               ? messageOf(runner.reason, "Runner status unavailable")
