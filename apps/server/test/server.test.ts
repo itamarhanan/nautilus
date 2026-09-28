@@ -546,6 +546,22 @@ test("startup refuses to serve a worktree that no longer matches its checkpoint"
   }
 });
 
+test("startup keeps serving when a project's folder is gone", async () => {
+  const fixture = await recoveryFixture(3218);
+  await rm(fixture.root, { recursive: true, force: true });
+  const app = await fixture.boot();
+  try {
+    expect(app.registry.getProject("demo")).toMatchObject({
+      state: "unhealthy",
+      lastError: "shadow_invalid:worktree_missing",
+    });
+    expect(app.lifecycle.snapshot().degradedProjects).toContain("demo");
+  } finally {
+    await app.close();
+    await fixture.cleanup();
+  }
+});
+
 test("startup refuses a project whose last checkpoint was cut off", async () => {
   const fixture = await recoveryFixture(3217);
   await writeFile(
