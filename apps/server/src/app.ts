@@ -183,6 +183,7 @@ export async function createNautilusApp(options: AppOptions = {}): Promise<Nauti
     });
     await checkProjects(sync, registry, lifecycle);
   }
+  await projectManager.stopLeftovers();
   await projectManager.recoverActiveProject();
   const sessions = options.openCode
     ? new SessionService(options.openCode, registry, projectMap, logger, sync)

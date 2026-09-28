@@ -60,37 +60,47 @@ async function listeningSockets(): Promise<Map<string, { host: string; port: num
   return sockets;
 }
 
-async function processStat(pid: number): Promise<{ ppid: number; pgrp: number } | undefined> {
+async function processStat(
+  pid: number,
+): Promise<{ ppid: number; pgrp: number; session: number } | undefined> {
   try {
     const stat = await readFile(`/proc/${String(pid)}/stat`, "utf8");
 
     const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-    return { ppid: Number(fields[1]), pgrp: Number(fields[2]) };
+    return { ppid: Number(fields[1]), pgrp: Number(fields[2]), session: Number(fields[3]) };
   } catch {
     return undefined;
   }
 }
 
-export async function groupListeners(groupId: number): Promise<Listener[]> {
+// A dev server starts in a session of its own, and everything it spawns stays
+// in it, even what a task runner such as turbo moves into a process group of
+// its own. Maps each member to its parent.
+export async function sessionMembers(sessionId: number): Promise<Map<number, number>> {
+  const members = new Map<number, number>();
   let entries: string[];
   try {
     entries = await readdir("/proc");
   } catch {
-    return [];
+    return members;
   }
-  const members = new Map<number, number>();
   for (const entry of entries) {
     const pid = Number(entry);
     if (!Number.isInteger(pid)) continue;
     const stat = await processStat(pid);
-    if (stat?.pgrp === groupId) members.set(pid, stat.ppid);
+    if (stat?.session === sessionId) members.set(pid, stat.ppid);
   }
+  return members;
+}
+
+export async function sessionListeners(sessionId: number): Promise<Listener[]> {
+  const members = await sessionMembers(sessionId);
   if (members.size === 0) return [];
   const sockets = await listeningSockets();
   const found = new Map<string, Listener>();
   for (const pid of members.keys()) {
     let depth = 0;
-    for (let parent = pid; parent !== groupId && members.has(parent); depth += 1) {
+    for (let parent = pid; parent !== sessionId && members.has(parent); depth += 1) {
       parent = members.get(parent) as number;
     }
     let fds: string[];

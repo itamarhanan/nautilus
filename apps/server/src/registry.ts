@@ -315,6 +315,38 @@ export class Registry {
     return port === null ? null : `http://127.0.0.1:${String(port)}`;
   }
 
+  devSession(projectId: string): number | null {
+    const row = this.db
+      .prepare("SELECT value FROM server_state WHERE key = ?")
+      .get(`dev_session:${projectId}`) as { value: string } | undefined;
+    return row ? Number(row.value) : null;
+  }
+
+  devSessions(): { projectId: string; sessionId: number }[] {
+    const rows = this.db
+      .prepare("SELECT key, value FROM server_state WHERE key LIKE 'dev_session:%'")
+      .all() as { key: string; value: string }[];
+    return rows
+      .map((row) => ({
+        projectId: row.key.slice("dev_session:".length),
+        sessionId: Number(row.value),
+      }))
+      .filter((row) => Number.isSafeInteger(row.sessionId) && row.sessionId > 1);
+  }
+
+  setDevSession(projectId: string, sessionId: number | null): void {
+    const key = `dev_session:${projectId}`;
+    if (sessionId === null) {
+      this.db.prepare("DELETE FROM server_state WHERE key = ?").run(key);
+      return;
+    }
+    this.db
+      .prepare(
+        "INSERT INTO server_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      )
+      .run(key, String(sessionId));
+  }
+
   setActiveDevTarget(projectId: string, target: string | null): void {
     const key = `dev_target:${projectId}`;
     if (target === null) {

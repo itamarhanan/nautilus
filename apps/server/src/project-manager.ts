@@ -1,11 +1,11 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, readlink, realpath, stat } from "node:fs/promises";
 import { createConnection } from "node:net";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import type { Readable } from "node:stream";
 import type { ProjectConfig, ProjectRecord } from "@nautilus/types";
 import { HttpError } from "./errors";
-import { groupListeners, pickListener } from "./listeners";
+import { pickListener, sessionListeners, sessionMembers } from "./listeners";
 import type { Logger } from "./logger";
 import type { Registry } from "./registry";
 
@@ -34,6 +34,50 @@ async function readIfExists(path: string): Promise<string | undefined> {
   } catch {
     return undefined;
   }
+}
+
+// A dev server that exits because its port is taken says so in its output.
+function portInUse(output: string): string | undefined {
+  const port = /EADDRINUSE[^\n]*?:(\d{2,5})\b/.exec(output)?.[1];
+  return port === undefined ? undefined : `dev_port_in_use:${port}`;
+}
+
+// Stops what is left of a dev server's session. A folder limits it to
+// processes working inside that project, for a session recorded before the
+// runner restarted, whose number the system may since have given to another.
+async function stopSession(sessionId: number, folder?: string): Promise<number> {
+  const members = async (): Promise<number[]> => {
+    const pids = [...(await sessionMembers(sessionId)).keys()].filter((pid) => pid !== process.pid);
+    if (folder === undefined) return pids;
+    const inside: number[] = [];
+    for (const pid of pids) {
+      const cwd = await readlink(`/proc/${String(pid)}/cwd`).catch(() => undefined);
+      if (cwd !== undefined && (cwd === folder || cwd.startsWith(`${folder}${sep}`))) {
+        inside.push(pid);
+      }
+    }
+    return inside;
+  };
+  const signal = (pids: number[], name: NodeJS.Signals): void => {
+    for (const pid of pids) {
+      try {
+        process.kill(pid, name);
+      } catch {
+        // Already gone.
+      }
+    }
+  };
+  let pids = await members();
+  const found = pids.length;
+  if (found === 0) return 0;
+  signal(pids, "SIGTERM");
+  for (let waited = 0; waited < 3000; waited += 100) {
+    await sleep(100);
+    pids = await members();
+    if (pids.length === 0) return found;
+  }
+  signal(pids, "SIGKILL");
+  return found;
 }
 
 function parseDevCommand(command: string): {
@@ -80,12 +124,12 @@ async function waitForDevServer(
     if (child.exitCode !== null) {
       throw new Error("dev_process_exited");
     }
-    const group = child.pid;
-    if (group !== undefined) {
-      let listener = pickListener(await groupListeners(group), port);
+    const session = child.pid;
+    if (session !== undefined) {
+      let listener = pickListener(await sessionListeners(session), port);
       if (listener && listener.port !== port) {
         await sleep(500);
-        listener = pickListener(await groupListeners(group), port) ?? listener;
+        listener = pickListener(await sessionListeners(session), port) ?? listener;
       }
       if (listener) return `http://${listener.host}:${String(listener.port)}`;
     }
@@ -116,6 +160,22 @@ export class ProjectManager {
 
   private async hasCode(projectId: string): Promise<boolean> {
     return (await this.projectHasCode?.(projectId)) ?? true;
+  }
+
+  // A dev server outlives a runner that stops without stopping it, and keeps
+  // its port. This stops what is left of the ones recorded before the restart.
+  async stopLeftovers(): Promise<void> {
+    for (const { projectId, sessionId } of this.registry.devSessions()) {
+      const project = this.projects.get(projectId);
+      if (project) {
+        const folder = await realpath(project.remotePath).catch(() => project.remotePath);
+        const stopped = await stopSession(sessionId, folder);
+        if (stopped > 0) {
+          this.logger.info("project_leftover_stopped", { projectId, processes: stopped });
+        }
+      }
+      this.registry.setDevSession(projectId, null);
+    }
   }
 
   async recoverActiveProject(): Promise<ProjectRecord | undefined> {
@@ -185,6 +245,7 @@ export class ProjectManager {
 
     this.registry.setActiveProjectId(id);
     this.registry.updateProjectState(id, "starting", null);
+    let outputTail = (): string => "";
     try {
       const directory = await stat(configured.remotePath);
       if (!directory.isDirectory()) {
@@ -208,10 +269,19 @@ export class ProjectManager {
         },
         stdio: ["ignore", "pipe", "pipe"],
       });
-      const outputTail = captureOutputTail(child.stdout, child.stderr);
+      outputTail = captureOutputTail(child.stdout, child.stderr);
+      const session = child.pid;
+      if (session !== undefined) this.registry.setDevSession(id, session);
       const active = { child, stopping: false };
       this.active.set(id, active);
       child.once("exit", (code, signal) => {
+        // A task runner can exit and leave the server it started holding the
+        // port, so the rest of the session goes with it.
+        if (session !== undefined) {
+          void stopSession(session).then(() => {
+            if (this.registry.devSession(id) === session) this.registry.setDevSession(id, null);
+          });
+        }
         if (this.active.get(id)?.child !== child) {
           return;
         }
@@ -223,7 +293,9 @@ export class ProjectManager {
         this.registry.updateProjectState(
           id,
           active.stopping ? "stopped" : "error",
-          active.stopping ? null : `process_exited:${String(code ?? signal ?? "unknown")}`,
+          active.stopping
+            ? null
+            : (portInUse(outputTail()) ?? `process_exited:${String(code ?? signal ?? "unknown")}`),
         );
         this.logger.info("project_process_exited", {
           projectId: id,
@@ -257,7 +329,8 @@ export class ProjectManager {
         this.registry.setActiveProjectId(null);
       }
       this.registry.setActiveDevTarget(id, null);
-      const message = error instanceof Error ? error.message : "project_start_failed";
+      const reason = error instanceof Error ? error.message : "project_start_failed";
+      const message = (reason === "dev_process_exited" && portInUse(outputTail())) || reason;
       this.registry.updateProjectState(id, "error", message);
       this.logger.error("project_start_failed", {
         projectId: id,
@@ -386,5 +459,8 @@ export class ProjectManager {
     } catch {
       child.kill("SIGKILL");
     }
+    // turbo and similar runners move each task into a process group of its
+    // own, which the signals above never reach.
+    await stopSession(pid);
   }
 }
