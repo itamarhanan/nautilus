@@ -71,6 +71,18 @@ function parseCookies(header: string | undefined): Map<string, string> {
   return cookies;
 }
 
+// The previewed app keeps its own cookies, so its sign-in and saved state work.
+// The runner's device session and preview passes never reach it: browsers do
+// not separate cookies by port, so they can arrive on the preview origin too.
+function projectCookies(header: string | undefined): string | undefined {
+  const kept = (header ?? "").split(";").filter((item) => {
+    const separator = item.indexOf("=");
+    const name = item.slice(0, Math.max(separator, 0)).trim();
+    return name !== "" && name !== "nautilus_session" && !name.startsWith("nautilus_preview_");
+  });
+  return kept.length > 0 ? kept.map((item) => item.trim()).join("; ") : undefined;
+}
+
 function previewCookieName(projectId: ProjectId): string {
   return `nautilus_preview_${projectId.replaceAll("-", "_")}`;
 }
@@ -173,7 +185,9 @@ export function createNautilusGateway(options: GatewayOptions): NautilusGateway 
   function preparePreviewRequest(request: IncomingMessage, target: string, upgrade = false): void {
     const sameOrigin = isSameOrigin(request);
     delete request.headers.authorization;
-    delete request.headers.cookie;
+    const cookies = projectCookies(request.headers.cookie);
+    if (cookies) request.headers.cookie = cookies;
+    else delete request.headers.cookie;
     if (!sameOrigin) return;
     // Next.js takes a live-reload socket only from localhost and answers any
     // other origin with a bare word instead of HTTP, so a socket names
