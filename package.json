@@ -5,7 +5,7 @@
   "license": "GPL-3.0-only",
   "type": "module",
   "scripts": {
-    "dev": "turbo run dev --parallel",
+    "dev": "turbo run dev",
     "dev:local": "./scripts/dev-local.sh",
     "deploy:studio": "./scripts/deploy-lightning.sh",
     "dev:server": "pnpm --filter @nautilus/server dev",
