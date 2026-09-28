@@ -76,13 +76,15 @@ Runner, under `~/nautilus/`:
 
 PC, under `~/.nautilus/`:
 
-| Path                 | Contents                                                                              |
-| -------------------- | ------------------------------------------------------------------------------------- |
-| `config.json`        | The runner URL, the SSH host, user and key path, and the folders to search.           |
-| `state.json`         | The projects, recent folders and folder-scan cache. The agent reads projects from it. |
-| `shadow/<id>.git`    | The PC's shadow repository for each project.                                          |
-| `transactions/<id>/` | The sync base, history, transactions, preflights and cached responses.                |
-| `backups/<id>/`      | A bundle of the PC's state before each pull. The last three are kept.                 |
+| Path                                  | Contents                                                                                           |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `config.json`                         | The runner URL, the SSH host, user and key path, and the folders to search.                        |
+| `state.json`                          | The projects, recent folders and folder-scan cache. The agent reads projects from it.              |
+| `shadow/<id>.git`                     | The PC's shadow repository for each project.                                                       |
+| `runners/<runner>/transactions/<id>/` | The sync base, history, transactions, preflights and cached responses, kept apart for each runner. |
+| `runners/<runner>/backups/<id>/`      | A bundle of the PC's state before each pull. The last three are kept.                              |
+
+`<runner>` is `local` for a runner on the same PC, otherwise `runner-` and a short hash of the runner URL. The desktop starts the agent with it, and restarts the agent when the runner changes, so switching runners never carries one runner's base to another. State from before this layout stays in `transactions/<id>/` and `backups/<id>/` until a runner names the same base, and then moves under that runner.
 
 Neither side ever touches the project's own `.git`.
 
