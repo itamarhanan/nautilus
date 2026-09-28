@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { ProjectRecord } from "@nautilus/types";
 import { Button } from "@astryxdesign/core/Button";
 import { IconButton } from "@astryxdesign/core/IconButton";
@@ -16,6 +16,35 @@ type PreviewState =
   | { status: "loading" }
   | { status: "ready"; url: string }
   | { status: "failed"; error: string };
+
+// A preview link opened on its own shows a page that posts the one-time token
+// back, so a link-preview fetch cannot use it up. Some mobile browsers leave
+// that page waiting for a tap inside a frame, so this page posts the token
+// into the frame itself.
+function EmbeddedPreview({ url, title }: { url: string; title: string }) {
+  const form = useRef<HTMLFormElement>(null);
+  const submitted = useRef(false);
+  const name = useId();
+
+  useEffect(() => {
+    // The token redeems once, so a second run of this effect must not post it.
+    if (submitted.current) return;
+    submitted.current = true;
+    form.current?.submit();
+  }, []);
+
+  return (
+    <>
+      <form ref={form} method="post" action={url} target={name} hidden />
+      <iframe
+        name={name}
+        className="size-full border-0 bg-white"
+        title={title}
+        sandbox="allow-forms allow-modals allow-popups allow-same-origin allow-scripts"
+      />
+    </>
+  );
+}
 
 export function PreviewPanel({ project }: { project: ProjectRecord }) {
   const { previewUrl, changeProjectState } = useActions();
@@ -127,12 +156,7 @@ export function PreviewPanel({ project }: { project: ProjectRecord }) {
             actions={<Button label="Try again" clickAction={load} />}
           />
         ) : (
-          <iframe
-            className="size-full border-0 bg-white"
-            title={`${project.name} preview`}
-            src={preview.url}
-            sandbox="allow-forms allow-modals allow-popups allow-same-origin allow-scripts"
-          />
+          <EmbeddedPreview key={preview.url} url={preview.url} title={`${project.name} preview`} />
         )}
       </div>
     </div>
