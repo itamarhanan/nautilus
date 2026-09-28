@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import type { ProjectRecord, SyncEvent } from "@nautilus/types";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Button } from "@astryxdesign/core/Button";
+import { Card } from "@astryxdesign/core/Card";
 import { ClickableCard } from "@astryxdesign/core/ClickableCard";
 import { DropdownMenu } from "@astryxdesign/core/DropdownMenu";
 import { Grid } from "@astryxdesign/core/Grid";
@@ -20,7 +21,7 @@ import {
   SquareArrowOutUpRight,
   Trash2,
 } from "lucide-react";
-import { projects as projectsText, sync as syncText } from "@nautilus/copy";
+import { projects as projectsText, readableStatus, sync as syncText } from "@nautilus/copy";
 import { ActivityList } from "../components/ActivityList";
 import { useApp } from "../context";
 import {
@@ -36,7 +37,7 @@ import {
   type SyncFacts,
 } from "../lib/format";
 import type { StateProject } from "../lib/state";
-import { RemoveProjectDialog } from "../overlays/RemoveProjectDialog";
+import { RemoveProjectDialog, type RemoveTarget } from "../overlays/RemoveProjectDialog";
 import type { ProjectStatus } from "../store";
 import { GetStarted } from "./GetStarted";
 
@@ -138,7 +139,7 @@ export function HomeView() {
   const connected = useApp((state) => state.connection.phase === "connected");
   const selectProject = useApp((state) => state.selectProject);
   const setPaletteOpen = useApp((state) => state.setPaletteOpen);
-  const [removing, setRemoving] = useState<StateProject | null>(null);
+  const [removing, setRemoving] = useState<RemoveTarget | null>(null);
 
   const cards = useMemo(
     () =>
@@ -175,8 +176,39 @@ export function HomeView() {
     () => Object.fromEntries(projects.map((project) => [project.id, project.name])),
     [projects],
   );
+  const runnerOnly = useMemo(
+    () =>
+      connected
+        ? records.filter((record) => !projects.some((project) => project.id === record.id))
+        : [],
+    [connected, records, projects],
+  );
 
-  if (projects.length === 0) return <GetStarted />;
+  const onRemoveFromRunner = (record: ProjectRecord) => {
+    setRemoving({ id: record.id, name: record.name, runnerOnly: true });
+  };
+  const dialog = (
+    <RemoveProjectDialog
+      project={removing}
+      onClose={() => {
+        setRemoving(null);
+      }}
+    />
+  );
+
+  if (projects.length === 0) {
+    return (
+      <>
+        <GetStarted />
+        {runnerOnly.length > 0 ? (
+          <div className="mx-auto w-full max-w-xl px-6 pb-10">
+            <RunnerOnlySection records={runnerOnly} onRemove={onRemoveFromRunner} />
+          </div>
+        ) : null}
+        {dialog}
+      </>
+    );
+  }
 
   const attention = cards.filter((card) => card.rank === 0).length;
   const moving = cards.filter((card) => card.rank === 1).length;
@@ -211,6 +243,10 @@ export function HomeView() {
         ))}
       </Grid>
 
+      {runnerOnly.length > 0 ? (
+        <RunnerOnlySection records={runnerOnly} onRemove={onRemoveFromRunner} />
+      ) : null}
+
       <section className="flex flex-col gap-2">
         <Heading level={4} accessibilityLevel={2}>
           Sync history
@@ -218,10 +254,77 @@ export function HomeView() {
         <ActivityList events={activity} projectNames={names} />
       </section>
 
-      <RemoveProjectDialog
-        project={removing}
-        onClose={() => {
-          setRemoving(null);
+      {dialog}
+    </div>
+  );
+}
+
+function RunnerOnlySection({
+  records,
+  onRemove,
+}: {
+  records: ProjectRecord[];
+  onRemove: (record: ProjectRecord) => void;
+}) {
+  return (
+    <section className="flex flex-col gap-2">
+      <div className="flex flex-col gap-0.5">
+        <Heading level={4} accessibilityLevel={2}>
+          Only on the runner
+        </Heading>
+        <Text type="supporting">
+          The runner has these projects, but this PC does not. Remove one to delete the
+          runner&apos;s copy. Nothing on this PC changes.
+        </Text>
+      </div>
+      <Card padding={2}>
+        <div className="flex flex-col divide-y divide-border">
+          {records.map((record) => (
+            <RunnerOnlyRow key={record.id} record={record} onRemove={onRemove} />
+          ))}
+        </div>
+      </Card>
+    </section>
+  );
+}
+
+function RunnerOnlyRow({
+  record,
+  onRemove,
+}: {
+  record: ProjectRecord;
+  onRemove: (record: ProjectRecord) => void;
+}) {
+  const attention = projectAttention(record);
+  const problem = record.lastError?.split("\n")[0];
+  return (
+    <div className="flex items-center justify-between gap-3 px-3 py-2">
+      <div className="flex min-w-0 flex-col gap-0.5">
+        <div className="flex min-w-0 items-center gap-2">
+          <Text weight="semibold" maxLines={1}>
+            {record.name}
+          </Text>
+          <Badge
+            variant={attention?.variant ?? "neutral"}
+            label={attention?.label ?? readableStatus(record.state)}
+          />
+        </div>
+        <Text type="code" size="xsm" color="secondary" maxLines={1} className="select-text">
+          {record.id}
+        </Text>
+        {problem ? (
+          <Text type="supporting" color="secondary" maxLines={2} className="select-text">
+            {problem}
+          </Text>
+        ) : null}
+      </div>
+      <Button
+        label={projectsText.remove}
+        variant="destructive"
+        size="sm"
+        icon={<Trash2 className="size-3.5" aria-hidden />}
+        onClick={() => {
+          onRemove(record);
         }}
       />
     </div>
