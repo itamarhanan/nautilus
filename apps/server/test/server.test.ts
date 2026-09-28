@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
@@ -1093,5 +1093,234 @@ test("adding a project the runner already knows still creates its directory", as
   } finally {
     await app.close();
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+async function deletionFixture() {
+  const runtime = await mkdtemp(join(tmpdir(), "nautilus-delete-"));
+  const projectsRoot = join(runtime, "projects");
+  const shadowRoot = join(runtime, "shadow");
+  const statePath = join(runtime, "sync-state");
+  const remotePath = join(projectsRoot, "demo");
+  await mkdir(remotePath, { recursive: true });
+  await writeFile(join(remotePath, "index.js"), "console.log('demo')\n");
+  const configured = project({ remotePath });
+  const boot = (projects: ProjectConfig[] = [configured]) =>
+    createNautilusApp({
+      registryPath: join(runtime, "registry.sqlite"),
+      lifecyclePath: join(runtime, "journal.jsonl"),
+      authSecret: testSecret,
+      projectsRoot,
+      projects,
+      logger: new Logger(() => undefined),
+      sync: new RunnerSyncCoordinator({
+        projects,
+        shadowRoot,
+        statePath,
+        client: new TunnelSyncClient({ endpoint: "http://127.0.0.1:9/v1/sync" }),
+      }),
+    });
+  return { runtime, projectsRoot, shadowRoot, statePath, remotePath, configured, boot };
+}
+
+test("deleting a project removes its files, sync state and sessions, and clears degraded", async () => {
+  const fixture = await deletionFixture();
+  const shadow = new ShadowGit({
+    gitDir: join(fixture.shadowRoot, "demo.git"),
+    workTree: fixture.remotePath,
+  });
+  const head = await shadow.snapshot("Checkpoint before deletion");
+  await mkdir(join(fixture.statePath, "demo"), { recursive: true });
+  await writeFile(join(fixture.statePath, "demo", "base.json"), JSON.stringify(head));
+  // A change no checkpoint captured marks the project unhealthy on boot.
+  await writeFile(join(fixture.remotePath, "stray.txt"), "changed after the checkpoint\n");
+  const app = await fixture.boot();
+  const ports = await listen(app);
+  try {
+    const session = app.registry.createAgentSession("demo", "opencode-1", "A turn");
+    app.registry.appendAgentSessionEvent(session.id, "session.message", { text: "hi" });
+    const degraded = await request(ports, "GET", "/health");
+    expect(degraded.body.lifecycle).toMatchObject({
+      state: "degraded",
+      degradedProjects: ["demo"],
+    });
+
+    const deleted = await request(ports, "DELETE", "/api/projects/demo", { control: true });
+    expect(deleted.status).toBe(204);
+    expect(existsSync(fixture.remotePath)).toBe(false);
+    expect(existsSync(fixture.projectsRoot)).toBe(true);
+    expect(existsSync(join(fixture.shadowRoot, "demo.git"))).toBe(false);
+    expect(existsSync(join(fixture.statePath, "demo"))).toBe(false);
+    expect(existsSync(join(fixture.statePath, "demo.lock"))).toBe(false);
+    expect(app.registry.getProject("demo")).toBeUndefined();
+    expect(app.registry.getAgentSession(session.id)).toBeUndefined();
+    expect(app.registry.listAgentSessionEvents(session.id)).toEqual([]);
+
+    const ready = await request(ports, "GET", "/health");
+    expect(ready.body.lifecycle).toMatchObject({ state: "ready", degradedProjects: [] });
+    const journal = (await readFile(join(fixture.runtime, "journal.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { state?: string });
+    expect(journal.filter((entry) => entry.state).map((entry) => entry.state)).toEqual([
+      "starting",
+      "degraded",
+      "ready",
+    ]);
+
+    expect((await request(ports, "DELETE", "/api/projects/demo", { control: true })).status).toBe(
+      404,
+    );
+
+    const registered = await request(ports, "POST", "/api/projects", {
+      control: true,
+      body: { projectId: "demo", name: "Demo again" },
+    });
+    expect(registered.status).toBe(201);
+    const status = await request(ports, "GET", "/api/projects/demo/sync-status", {
+      control: true,
+    });
+    expect(status.status).toBe(200);
+    expect(status.body).toMatchObject({ neverSynced: true, baseHead: null, changedFiles: 0 });
+    const history = await request(ports, "GET", "/api/projects/demo/sync-history", {
+      control: true,
+    });
+    expect(history.body.events).toEqual([]);
+    expect(app.registry.listAgentSessions("demo")).toEqual([]);
+  } finally {
+    await app.close();
+    await rm(fixture.runtime, { recursive: true, force: true });
+  }
+});
+
+test("deleting a project never removes a folder outside the projects root", async () => {
+  const fixture = await deletionFixture();
+  const outside = await mkdtemp(join(tmpdir(), "nautilus-outside-"));
+  const linkedTarget = await mkdtemp(join(tmpdir(), "nautilus-linked-"));
+  await writeFile(join(outside, "keep.txt"), "mine\n");
+  await writeFile(join(linkedTarget, "keep.txt"), "also mine\n");
+  const linked = join(fixture.projectsRoot, "linked");
+  await symlink(linkedTarget, linked);
+  const escaping = join(fixture.projectsRoot, "..", "escaping");
+  await mkdir(escaping);
+  const app = await fixture.boot([
+    project({ id: "outside", remotePath: outside, devPort: 3220 }),
+    project({ id: "linked", remotePath: linked, devPort: 3221 }),
+    project({ id: "escaping", remotePath: escaping, devPort: 3222 }),
+    project({ id: "root", remotePath: fixture.projectsRoot, devPort: 3223 }),
+  ]);
+  const ports = await listen(app);
+  try {
+    for (const id of ["outside", "linked", "escaping", "root"]) {
+      const deleted = await request(ports, "DELETE", `/api/projects/${id}`, { control: true });
+      expect(deleted.status, id).toBe(204);
+      expect(app.registry.getProject(id), id).toBeUndefined();
+    }
+    expect(await readFile(join(outside, "keep.txt"), "utf8")).toBe("mine\n");
+    expect(await readFile(join(linkedTarget, "keep.txt"), "utf8")).toBe("also mine\n");
+    expect(existsSync(linked)).toBe(true);
+    expect(existsSync(escaping)).toBe(true);
+    expect(existsSync(join(fixture.projectsRoot, "demo", "index.js"))).toBe(true);
+  } finally {
+    await app.close();
+    await rm(fixture.runtime, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+    await rm(linkedTarget, { recursive: true, force: true });
+  }
+});
+
+test("a project is not deleted while an agent runs or a sync holds its lock", async () => {
+  const fixture = await deletionFixture();
+  const app = await fixture.boot();
+  const ports = await listen(app);
+  try {
+    const session = app.registry.createAgentSession("demo", "opencode-1", "A turn");
+    app.registry.setAgentSessionStatus(session.id, "running");
+    const busyAgent = await request(ports, "DELETE", "/api/projects/demo", { control: true });
+    expect(busyAgent.status).toBe(409);
+    expect(busyAgent.body.error).toBe("agent_running");
+    app.registry.setAgentSessionStatus(session.id, "idle");
+
+    await mkdir(fixture.statePath, { recursive: true });
+    await writeFile(
+      join(fixture.statePath, "demo.lock"),
+      JSON.stringify({
+        pid: process.ppid,
+        instance: "other",
+        acquiredAt: new Date().toISOString(),
+      }),
+    );
+    const busySync = await request(ports, "DELETE", "/api/projects/demo", { control: true });
+    expect(busySync.status).toBe(409);
+    expect(busySync.body.error).toBe("project_busy");
+    expect(existsSync(join(fixture.remotePath, "index.js"))).toBe(true);
+    expect(app.registry.getAgentSession(session.id)).toBeDefined();
+    const status = await request(ports, "GET", "/api/projects/demo/sync-status", {
+      control: true,
+    });
+    expect(status.status).toBe(200);
+  } finally {
+    await app.close();
+    await rm(fixture.runtime, { recursive: true, force: true });
+  }
+});
+
+test("a paired phone reads sync history but no other sync route", async () => {
+  const fakeSync = {
+    connect: () => undefined,
+    recoverAll: () => Promise.resolve(),
+    validateAll: () => Promise.resolve(new Map()),
+    pendingCheckpoints: () => Promise.resolve([]),
+    addProject: () => undefined,
+    hasCode: () => Promise.resolve(true),
+    history: () =>
+      Promise.resolve([
+        {
+          requestId: "r1",
+          projectId: "demo",
+          direction: "push",
+          status: "conflict",
+          baseHead: null,
+          localHead: null,
+          remoteHead: null,
+          errorCode: null,
+          conflicts: [{ path: "a.txt", reason: "content", pc: "modified", secret: "x" }],
+          createdAt: new Date().toISOString(),
+          committedAt: null,
+          grant: "leaked-grant",
+        },
+      ]),
+  } as unknown as SyncCoordinator;
+  const app = await createNautilusApp({
+    registryPath: ":memory:",
+    authSecret: testSecret,
+    projects: [project()],
+    sync: fakeSync,
+    logger: new Logger(() => undefined),
+  });
+  const ports = await listen(app);
+  try {
+    const { cookie } = await pairDevice(ports);
+    const history = await request(ports, "GET", "/api/projects/demo/sync-history", { cookie });
+    expect(history.status).toBe(200);
+    const [event] = history.body.events as Array<Record<string, unknown>>;
+    expect(event).toMatchObject({ requestId: "r1", status: "conflict" });
+    expect(event).not.toHaveProperty("grant");
+    expect(event?.conflicts).toEqual([{ path: "a.txt", reason: "content", pc: "modified" }]);
+
+    expect((await request(ports, "GET", "/api/projects/demo/sync-history")).status).toBe(401);
+
+    const adminOnly: Array<[string, string, unknown?]> = [
+      ["GET", "/api/projects/demo/sync-status"],
+      ["POST", "/api/projects/demo/sync-rewind", { from: "a", to: "b" }],
+      ["POST", "/api/projects/demo/sync-requests", { direction: "pull" }],
+      ["POST", "/api/projects/demo/sync-requests/preview", { direction: "pull" }],
+    ];
+    for (const [method, path, body] of adminOnly) {
+      const response = await request(ports, method, path, { cookie, body });
+      expect(response.status, `${method} ${path}`).toBe(404);
+    }
+  } finally {
+    await app.close();
   }
 });
