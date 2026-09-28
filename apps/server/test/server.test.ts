@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { request as httpRequest } from "node:http";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
@@ -459,6 +460,127 @@ test("project start waits for the dev server and stop terminates it", async () =
   } finally {
     await app.close();
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function until(check: () => boolean | Promise<boolean>, timeoutMs = 5000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await check()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return check();
+}
+
+test("stop reaches a server that a task runner moved into a process group of its own", async () => {
+  const root = await mkdtemp(join(tmpdir(), "nautilus-test-"));
+  const pidFile = join(root, "server.pid");
+  await writeFile(
+    join(root, "server.js"),
+    `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));\n` +
+      "require('http').createServer((_, response) => response.end('ok')).listen(3240)\n",
+  );
+  // Job control gives the background server a process group of its own, the
+  // way turbo runs each task.
+  await writeFile(join(root, "runner.sh"), "set -m\nnode server.js &\nwait\n");
+  const app = await createNautilusApp({
+    registryPath: ":memory:",
+    authSecret: testSecret,
+    projects: [project({ remotePath: root, devCommand: "bash runner.sh", devPort: 3240 })],
+    logger: new Logger(() => undefined),
+    devReadyTimeoutMs: 5000,
+  });
+  const ports = await listen(app);
+
+  try {
+    const started = await request(ports, "POST", "/api/projects/demo/start", { control: true });
+    expect(started.status).toBe(200);
+    const server = Number(await readFile(pidFile, "utf8"));
+    expect(alive(server)).toBe(true);
+
+    const stopped = await request(ports, "POST", "/api/projects/demo/stop", { control: true });
+    expect(stopped.status).toBe(200);
+    expect(await until(() => !alive(server))).toBe(true);
+  } finally {
+    await app.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("startup stops a dev server left running by the runner before it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "nautilus-test-"));
+  const runtime = await mkdtemp(join(tmpdir(), "nautilus-test-state-"));
+  const serverScript = join(root, "server.js");
+  await writeFile(
+    serverScript,
+    "require('http').createServer((_, response) => response.end('ok')).listen(3241)\n",
+  );
+  let app: Awaited<ReturnType<typeof createNautilusApp>> | undefined;
+  let leftover: ReturnType<typeof spawn> | undefined;
+  let unrelated: ReturnType<typeof spawn> | undefined;
+
+  try {
+    // The dev server of a runner that died without stopping it: still in its
+    // own session, still working in the project, still holding the port.
+    leftover = spawn(process.execPath, [serverScript], {
+      cwd: root,
+      detached: true,
+      stdio: "ignore",
+    });
+    leftover.unref();
+    // A process that took over a recorded session number but works elsewhere.
+    unrelated = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      cwd: tmpdir(),
+      detached: true,
+      stdio: "ignore",
+    });
+    unrelated.unref();
+    const configured = project({
+      remotePath: root,
+      devCommand: `node ${serverScript}`,
+      devPort: 3241,
+    });
+    const other = project({ id: "other", name: "Other", remotePath: root, devPort: 3242 });
+    const registryPath = join(runtime, "registry.sqlite");
+    const registry = new Registry(registryPath);
+    registry.upsertProject(configured);
+    registry.upsertProject(other);
+    registry.updateProjectState("demo", "running", null);
+    registry.setActiveProjectId("demo");
+    registry.setDevSession("demo", leftover.pid as number);
+    registry.setDevSession("other", unrelated.pid as number);
+    registry.close();
+    expect(await until(() => existsSync(`/proc/${String(leftover?.pid)}`))).toBe(true);
+    app = await createNautilusApp({
+      registryPath,
+      authSecret: testSecret,
+      projects: [configured, other],
+      logger: new Logger(() => undefined),
+      devReadyTimeoutMs: 5000,
+    });
+    expect(alive(leftover.pid as number)).toBe(false);
+    expect(alive(unrelated.pid as number)).toBe(true);
+    expect(app.registry.getProject("demo")?.state).toBe("running");
+  } finally {
+    await app?.close();
+    for (const child of [unrelated, leftover]) {
+      try {
+        if (child?.pid !== undefined) process.kill(child.pid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
+    await rm(root, { recursive: true, force: true });
+    await rm(runtime, { recursive: true, force: true });
   }
 });
 
