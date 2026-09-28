@@ -71,7 +71,11 @@ export function runnerSlice(
         const [projects, devices] = await Promise.all([api.projects(), api.devices()]);
         set({ projects, devices });
 
-        await Promise.all([get().refreshStatus(), get().refreshHistory()]);
+        await Promise.all([
+          get().refreshStatus(),
+          get().refreshHistory(),
+          runtime.services.channel.refreshInfo(),
+        ]);
       } catch (error) {
         get().notify({
           tone: "error",

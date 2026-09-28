@@ -92,6 +92,17 @@ export class ControlChannel {
     }
   }
 
+  // The runner's lifecycle moves after connect, e.g. from degraded to ready once
+  // an unhealthy project is removed, so the info is fetched again on refresh.
+  async refreshInfo(): Promise<void> {
+    const { api, phase } = this.snapshot;
+    if (!api || phase !== "connected") return;
+    const generation = this.generation;
+    const info = await api.info({ timeoutMs: 3_000 }).catch(() => null);
+    if (!info || generation !== this.generation || this.snapshot.api !== api) return;
+    this.update({ info });
+  }
+
   reconnect(): void {
     if (!this.settings) return;
     void this.connect(this.settings).catch(() => undefined);

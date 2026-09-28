@@ -160,6 +160,7 @@ export function projectsSlice(
           .projects()
           .then((projects) => {
             set({ projects });
+            return services.channel.refreshInfo();
           })
           .catch(() => undefined);
       }
