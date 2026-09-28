@@ -1,11 +1,11 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, test } from "vitest";
 import type { SyncRequest } from "@nautilus/types";
-import { loadStateProjects } from "../src/config";
+import { loadAgentConfig, loadStateProjects, runnerKeyValue } from "../src/config";
 import { ShadowGit, shadowIndexPath } from "@nautilus/shadow-git";
 import { GrantAuthority } from "../src/grants";
 import { createSyncAgentServer } from "../src/index";
@@ -1236,5 +1236,159 @@ describe("sync agent", () => {
     expect(recovered.state?.baseHead).toBe(baseHead);
     expect(JSON.parse(await readFile(basePath, "utf8"))).toBe(baseHead);
     expect(created.status).toBe("ok");
+  });
+});
+
+describe("sync state per runner", () => {
+  function runnerConfig(
+    project: { root: string; workTree: string; shadowPath: string },
+    key: string,
+  ) {
+    const config = loadAgentConfig({ HOME: project.root, NAUTILUS_AGENT_RUNNER: key });
+    delete config.statePath;
+    return { ...config, projects: agentConfig(project).projects };
+  }
+
+  const exists = (path: string) =>
+    access(path).then(
+      () => true,
+      () => false,
+    );
+
+  test("accepts only short lowercase runner keys and defaults to the local runner", () => {
+    expect(runnerKeyValue(undefined)).toBe("local");
+    expect(runnerKeyValue("runner-0123abcd")).toBe("runner-0123abcd");
+    for (const key of ["", "Local", "../other", "a/b", "a_b", "x".repeat(65)]) {
+      expect(() => runnerKeyValue(key)).toThrow(/NAUTILUS_AGENT_RUNNER/);
+    }
+    expect(() => loadAgentConfig({ HOME: "/home/me", NAUTILUS_AGENT_RUNNER: ".." })).toThrow();
+    const config = loadAgentConfig({ HOME: "/home/me", NAUTILUS_AGENT_RUNNER: "runner-1" });
+    expect(config.transactionPath).toBe("/home/me/.nautilus/runners/runner-1/transactions");
+    expect(config.backupPath).toBe("/home/me/.nautilus/runners/runner-1/backups");
+    expect(config.legacyTransactionPath).toBe("/home/me/.nautilus/transactions");
+  });
+
+  test("a runner that never saw the project leaves another runner's base alone", async () => {
+    const project = await temporaryProject();
+    await writeFile(join(project.workTree, "README.md"), "hello\n");
+    const dev = new SyncAgent(runnerConfig(project, "local"), allowAll);
+    const created = await dev.handle(request("create_bundle"));
+    const head = created.bundle?.head ?? null;
+    await dev.handle(request("state", { payload: { runnerBase: head } }));
+    expect((await dev.localStatus("demo")).baseHead).toBe(head);
+
+    const production = new SyncAgent(runnerConfig(project, "runner-prod"), allowAll);
+    const first = await production.handle(request("preview", { payload: { runnerBase: null } }));
+    expect(first.state?.baseHead).toBeNull();
+    expect(first.diff?.files.map((file) => file.path)).toEqual(["README.md"]);
+
+    const again = await dev.handle(request("preview", { payload: { runnerBase: head } }));
+    expect(again.state?.baseHead).toBe(head);
+    expect(again.diff?.files).toEqual([]);
+    expect(
+      await exists(
+        join(project.root, ".nautilus", "runners", "local", "transactions", "demo", "state"),
+      ),
+    ).toBe(true);
+  });
+
+  test("a preview sends its diff once, and not at all when the caller skips it", async () => {
+    const project = await temporaryProject();
+    await writeFile(join(project.workTree, "README.md"), "hello\n");
+    const agent = new SyncAgent(agentConfig(project), allowAll);
+    const preview = await agent.handle(request("preview"));
+    expect(preview.diff?.files).toHaveLength(1);
+    expect(preview.state?.changes).toEqual({ files: [], additions: 0, deletions: 0 });
+    const headsOnly = await agent.handle(request("preview", { payload: { includeDiff: false } }));
+    expect(headsOnly.status).toBe("ok");
+    expect(headsOnly.state?.head).toBe(preview.state?.head);
+    expect(headsOnly).not.toHaveProperty("diff");
+  });
+
+  test("hands legacy state only to the runner that names its base", async () => {
+    const project = await temporaryProject();
+    await writeFile(join(project.workTree, "README.md"), "hello\n");
+    const git = new ShadowGit({ gitDir: project.shadowPath, workTree: project.workTree });
+    const head = await git.snapshot("legacy");
+    const legacy = join(project.root, ".nautilus", "transactions", "demo");
+    await mkdir(join(legacy, "state"), { recursive: true });
+    await mkdir(join(legacy, "events"), { recursive: true });
+    await writeFile(join(legacy, "state", "base.json"), JSON.stringify(head));
+    await writeFile(
+      join(legacy, "events", "history.json"),
+      JSON.stringify([{ requestId: "old-pull", projectId: "demo", direction: "pull" }]),
+    );
+    const legacyBackups = join(project.root, ".nautilus", "backups", "demo");
+    await mkdir(legacyBackups, { recursive: true });
+    await writeFile(join(legacyBackups, "old-pull.bundle"), "bundle");
+
+    const production = new SyncAgent(runnerConfig(project, "runner-prod"), allowAll);
+    await production.recover();
+    for (const runnerBase of [null, "f".repeat(40)]) {
+      const preview = await production.handle(request("preview", { payload: { runnerBase } }));
+      expect(preview.state?.baseHead).toBeNull();
+    }
+    expect(await exists(join(legacy, "state", "base.json"))).toBe(true);
+
+    const dev = new SyncAgent(runnerConfig(project, "local"), allowAll);
+    await dev.recover();
+    const adopted = await dev.handle(request("preview", { payload: { runnerBase: head } }));
+    expect(adopted.state?.baseHead).toBe(head);
+    expect(await exists(legacy)).toBe(false);
+    expect(await exists(legacyBackups)).toBe(false);
+    const runner = join(project.root, ".nautilus", "runners", "local");
+    expect(await exists(join(runner, "backups", "demo", "old-pull.bundle"))).toBe(true);
+    const history = await dev.handle(request("history"));
+    expect(history.history?.map((event) => event.requestId)).toContain("old-pull");
+    expect((await production.localStatus("demo")).baseHead).toBeNull();
+  });
+
+  test("rolls back an interrupted pull left under another runner", async () => {
+    const project = await temporaryProject();
+    await writeFile(join(project.workTree, "README.md"), "base\n");
+    const git = new ShadowGit({ gitDir: project.shadowPath, workTree: project.workTree });
+    const baseHead = await git.snapshot("base");
+    await writeFile(join(project.workTree, "README.md"), "half-applied\n");
+    await git.snapshot("half-applied");
+
+    const other = join(
+      project.root,
+      ".nautilus",
+      "runners",
+      "runner-other",
+      "transactions",
+      "demo",
+    );
+    await mkdir(join(other, "transactions"), { recursive: true });
+    await mkdir(join(other, "recovery"), { recursive: true });
+    await mkdir(join(other, "state"), { recursive: true });
+    const recoveryPath = join(other, "recovery", "cut-off.json");
+    const transactionPath = join(other, "transactions", "cut-off.json");
+    await writeFile(join(other, "state", "base.json"), JSON.stringify("wrong-base"));
+    await writeFile(recoveryPath, JSON.stringify({ head: baseHead, baseHead }));
+    await writeFile(
+      transactionPath,
+      JSON.stringify({
+        requestId: "cut-off",
+        projectId: "demo",
+        direction: "pull",
+        status: "prepared",
+        baseHead,
+        expectedLocalHead: baseHead,
+        expectedRemoteHead: "remote",
+        preflight: "preflight",
+        recoveryPath,
+        previousBaseHead: baseHead,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }),
+    );
+
+    await new SyncAgent(runnerConfig(project, "local"), allowAll).recover();
+    expect(JSON.parse(await readFile(transactionPath, "utf8"))).toMatchObject({
+      status: "rolled_back",
+    });
+    expect(JSON.parse(await readFile(join(other, "state", "base.json"), "utf8"))).toBe(baseHead);
+    expect(await readFile(join(project.workTree, "README.md"), "utf8")).toBe("base\n");
   });
 });
