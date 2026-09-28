@@ -195,6 +195,12 @@ test("gateway routes the PWA and API and secures one-time previews", async () =>
     expect(previewCookie).toBeUndefined();
     expect(preview.headers.get("access-control-allow-origin")).toBeNull();
 
+    // The app's own cookies pass; the runner's session and preview pass do not.
+    const signedIn = await fetch(`${baseUrl}/preview/demo/account`, {
+      headers: { cookie: `${cookie as string}; nautilus_session=runner; app_theme=dark` },
+    });
+    expect(signedIn.status).toBe(200);
+    expect(previewCookie).toBe("app_theme=dark");
 
     const stream = await fetch(`${baseUrl}/events`, {
       signal: AbortSignal.timeout(1000),
@@ -401,6 +407,12 @@ test("the preview listener serves the running project at the root of its own ori
     expect(await asset.text()).toBe("preview");
     expect(previewPath).toBe("/_next/static/app.js");
     expect(previewCookie).toBeUndefined();
+    const signedIn = await fetch(`${previewUrl}/dashboard`, {
+      headers: { cookie: `app_session=abc; ${cookie}` },
+    });
+    expect(signedIn.status).toBe(200);
+    expect(previewPath).toBe("/dashboard");
+    expect(previewCookie).toBe("app_session=abc");
 
     const other: ProjectConfig = {
       ...project,
