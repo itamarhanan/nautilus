@@ -323,7 +323,8 @@ export class SyncAgent {
     const head = await git.snapshot(`Nautilus local preview ${now()}`);
 
     const baseHead = await this.reconcileBase(request, project, git);
-    const changes = await git.diff(baseHead, head);
+    // The diff travels once, in `diff`. A caller that only needs the heads,
+    // like the runner checking bases before a pull, can skip it.
     return response(request.requestId, {
       status: "ok",
       state: {
@@ -331,9 +332,9 @@ export class SyncAgent {
         head,
         baseHead,
         dirty: false,
-        changes,
+        changes: emptyDiff(),
       },
-      diff: changes,
+      ...(request.payload.includeDiff === false ? {} : { diff: await git.diff(baseHead, head) }),
     });
   }
 
