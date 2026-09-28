@@ -158,6 +158,30 @@ test("gateway routes the PWA and API and secures one-time previews", async () =>
     });
     expect(forged.status).toBe(401);
 
+    // The app page that asked for a token may post it from its own origin, and
+    // no other origin may.
+    const appToken = app.previewTokens.issue(project, 60, "https://app.example");
+    const appTokenUrl = `${baseUrl}/preview/demo/?token=${encodeURIComponent(appToken.token)}`;
+    const otherSite = await fetch(appTokenUrl, {
+      method: "POST",
+      headers: { origin: "https://evil.example" },
+      redirect: "manual",
+    });
+    expect(otherSite.status).toBe(401);
+    const fromApp = await fetch(appTokenUrl, {
+      method: "POST",
+      headers: { origin: "https://app.example" },
+      redirect: "manual",
+    });
+    expect(fromApp.status).toBe(303);
+    expect(fromApp.headers.get("set-cookie")).toContain("HttpOnly");
+    const unbound = app.previewTokens.issue(project, 60);
+    const unboundFromApp = await fetch(
+      `${baseUrl}/preview/demo/?token=${encodeURIComponent(unbound.token)}`,
+      { method: "POST", headers: { origin: "https://app.example" }, redirect: "manual" },
+    );
+    expect(unboundFromApp.status).toBe(401);
+
     const preview = await fetch(`${baseUrl}/preview/demo/assets/app.js?x=1`, {
       headers: {
         authorization: "Bearer should-be-stripped",
@@ -170,6 +194,7 @@ test("gateway routes the PWA and API and secures one-time previews", async () =>
     expect(previewAuthorization).toBeUndefined();
     expect(previewCookie).toBeUndefined();
     expect(preview.headers.get("access-control-allow-origin")).toBeNull();
+
 
     const stream = await fetch(`${baseUrl}/events`, {
       signal: AbortSignal.timeout(1000),

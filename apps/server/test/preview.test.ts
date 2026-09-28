@@ -113,6 +113,22 @@ test("a public preview token links to the preview listener; the control API's do
     expect(body.previewUrl).toBe(
       `https://8081-01abc.cloudspaces.litng.ai/?token=${encodeURIComponent(body.token)}`,
     );
+    expect(app.previewTokens.issuedFor(body.token)).toBeUndefined();
+
+    // The app page that asks for a token is the one allowed to post it.
+    for (const [origin, expected] of [
+      ["https://8080-01abc.cloudspaces.litng.ai", "https://8080-01abc.cloudspaces.litng.ai"],
+      ["https://8080-01abc.cloudspaces.litng.ai/path", undefined],
+      ["null", undefined],
+    ] as const) {
+      const bound = await request(ports, "POST", "/api/projects/demo/preview-token", {
+        cookie,
+        body: { ttlSeconds: 60 },
+        headers: { origin, "x-forwarded-host": "8080-01abc.cloudspaces.litng.ai" },
+      });
+      expect(bound.status).toBe(201);
+      expect(app.previewTokens.issuedFor((bound.body as { token: string }).token)).toBe(expected);
+    }
 
     const control = await request(ports, "POST", "/api/projects/demo/preview-token", {
       control: true,
