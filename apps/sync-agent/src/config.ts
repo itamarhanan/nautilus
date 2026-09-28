@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 
 export type AgentProject = {
   id: string;
@@ -15,6 +15,12 @@ export type AgentConfig = {
   home: string;
   transactionPath: string;
   backupPath: string;
+  // Every runner keeps its own base and history under runnersPath/<runner key>.
+  // Recovery scans all of them, and the legacy folders from before that.
+  runnersPath?: string;
+  legacyTransactionPath?: string;
+  legacyBackupPath?: string;
+  lockPath?: string;
   statePath?: string;
   projects: AgentProject[];
   maxFileBytes: number;
@@ -25,6 +31,16 @@ export type AgentConfig = {
 };
 
 const projectIdPattern = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+
+export const runnerKeyPattern = /^[a-z0-9-]{1,64}$/;
+
+export function runnerKeyValue(value: string | undefined): string {
+  const key = value ?? "local";
+  if (!runnerKeyPattern.test(key)) {
+    throw new Error("NAUTILUS_AGENT_RUNNER must be 1 to 64 lowercase letters, digits or dashes");
+  }
+  return key;
+}
 
 function expandPath(value: string, home: string): string {
   const expanded =
@@ -51,15 +67,19 @@ function numberValue(
 
 export function loadAgentConfig(env: NodeJS.ProcessEnv = process.env): AgentConfig {
   const home = env.HOME ?? homedir();
+  const runnerKey = runnerKeyValue(env.NAUTILUS_AGENT_RUNNER);
+  const root = expandPath("~/.nautilus", home);
+  const runnersPath = join(root, "runners");
   return {
     host: "127.0.0.1",
     port: numberValue(env.NAUTILUS_AGENT_PORT, 4100, "NAUTILUS_AGENT_PORT", 1, 65535),
     home,
-    transactionPath: expandPath(
-      env.NAUTILUS_AGENT_TRANSACTIONS ?? "~/.nautilus/transactions",
-      home,
-    ),
-    backupPath: expandPath(env.NAUTILUS_AGENT_BACKUPS ?? "~/.nautilus/backups", home),
+    transactionPath: join(runnersPath, runnerKey, "transactions"),
+    backupPath: join(runnersPath, runnerKey, "backups"),
+    runnersPath,
+    legacyTransactionPath: join(root, "transactions"),
+    legacyBackupPath: join(root, "backups"),
+    lockPath: join(root, "locks"),
     statePath: expandPath(env.NAUTILUS_STATE_PATH ?? "~/.nautilus/state.json", home),
     projects: [],
     maxFileBytes: numberValue(

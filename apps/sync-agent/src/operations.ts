@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, readdir, rm } from "node:fs/promises";
-import { join } from "node:path";
-import { loadStateProjects, type AgentConfig, type AgentProject } from "./config";
+import { mkdir, open, readFile, readdir, rename, rm, rmdir, stat } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { loadStateProjects, runnerKeyPattern, type AgentConfig, type AgentProject } from "./config";
 import { GrantError } from "./grants";
 import { validateSyncRequest } from "./protocol";
 import { parseResolutions } from "@nautilus/types";
@@ -138,51 +138,70 @@ export class SyncAgent {
   async recover(): Promise<void> {
     await mkdir(this.config.transactionPath, { recursive: true, mode: 0o700 });
     await mkdir(this.config.backupPath, { recursive: true, mode: 0o700 });
-    for (const project of await this.projects()) {
-      const transactionPath = this.projectDirectory(project, "transactions");
-      for (const entry of await readdir(transactionPath).catch(() => [])) {
-        if (!entry.endsWith(".json")) continue;
-        const path = join(transactionPath, entry);
-        const transaction = await readJson<SyncTransaction | undefined>(path, undefined);
-        if (!transaction || (transaction.status !== "prepared" && transaction.status !== "applied"))
-          continue;
-        const git = await this.git(project);
-        if (transaction.recoveryPath) {
-          const recovery = await readJson<
-            | {
-                head: string;
-                baseHead?: string | null;
-                bundlePath?: string;
-              }
-            | undefined
-          >(transaction.recoveryPath, undefined);
-          if (recovery?.bundlePath) {
-            const bytes = await readFile(recovery.bundlePath);
-            await git.importBundle(
-              {
-                bytes,
-                head: recovery.head,
-                sha256: createHash("sha256").update(bytes).digest("hex"),
-              },
-              null,
-            );
-          }
-          if (recovery?.head) {
-            await git.restoreHead(recovery.head);
-          }
-          if (transaction.previousBaseHead === null) {
-            await rm(this.stateFile(project), { force: true });
-          } else if (transaction.previousBaseHead) {
-            await this.setBase(project, transaction.previousBaseHead);
-          }
-        }
-        transaction.status = "rolled_back";
-        transaction.updatedAt = now();
-        await writeJson(path, transaction);
-      }
-      const nonces = await readJson<string[]>(join(transactionPath, "nonces.json"), []);
-      for (const nonce of nonces) this.usedNonces.add(nonce);
+    const projects = await this.projects();
+    for (const root of await this.transactionRoots())
+      for (const project of projects) await this.recoverProject(project, root);
+  }
+
+  // The current runner's state, every other runner's and the legacy folder:
+  // a pull cut off under one runner must roll back even after a switch.
+  private async transactionRoots(): Promise<string[]> {
+    const roots = new Set([this.config.transactionPath]);
+    if (this.config.legacyTransactionPath) roots.add(this.config.legacyTransactionPath);
+    const runners = this.config.runnersPath;
+    if (runners) {
+      const entries = await readdir(runners, { withFileTypes: true }).catch(() => []);
+      for (const entry of entries)
+        if (entry.isDirectory() && runnerKeyPattern.test(entry.name))
+          roots.add(join(runners, entry.name, "transactions"));
     }
+    return [...roots];
+  }
+
+  private async recoverProject(project: AgentProject, root: string): Promise<void> {
+    const transactionPath = this.projectDirectory(project, "transactions", root);
+    for (const entry of await readdir(transactionPath).catch(() => [])) {
+      if (!entry.endsWith(".json")) continue;
+      const path = join(transactionPath, entry);
+      const transaction = await readJson<SyncTransaction | undefined>(path, undefined);
+      if (!transaction || (transaction.status !== "prepared" && transaction.status !== "applied"))
+        continue;
+      const git = await this.git(project);
+      if (transaction.recoveryPath) {
+        const recovery = await readJson<
+          | {
+              head: string;
+              baseHead?: string | null;
+              bundlePath?: string;
+            }
+          | undefined
+        >(transaction.recoveryPath, undefined);
+        if (recovery?.bundlePath) {
+          const bytes = await readFile(recovery.bundlePath);
+          await git.importBundle(
+            {
+              bytes,
+              head: recovery.head,
+              sha256: createHash("sha256").update(bytes).digest("hex"),
+            },
+            null,
+          );
+        }
+        if (recovery?.head) {
+          await git.restoreHead(recovery.head);
+        }
+        if (transaction.previousBaseHead === null) {
+          await rm(this.stateFile(project, root), { force: true });
+        } else if (transaction.previousBaseHead) {
+          await this.setBase(project, transaction.previousBaseHead, root);
+        }
+      }
+      transaction.status = "rolled_back";
+      transaction.updatedAt = now();
+      await writeJson(path, transaction);
+    }
+    const nonces = await readJson<string[]>(join(transactionPath, "nonces.json"), []);
+    for (const nonce of nonces) this.usedNonces.add(nonce);
   }
 
   async handle(
@@ -224,6 +243,7 @@ export class SyncAgent {
           return { ...cached, replayed: true };
         }
         await this.authenticate(request);
+        await this.adoptLegacyState(request, project);
         const result = await this.dispatch(request, project, rawBundle, signal);
         await this.cacheResponse(request, result, project);
         if (result.status !== "ok") await this.recordFailure(request, project, result);
@@ -733,7 +753,10 @@ export class SyncAgent {
 
   private async withLock<T>(project: AgentProject, action: () => Promise<T>): Promise<T> {
     try {
-      return await withLock(join(this.config.transactionPath, `${project.id}.lock`), action);
+      return await withLock(
+        join(this.config.lockPath ?? this.config.transactionPath, `${project.id}.lock`),
+        action,
+      );
     } catch (error) {
       if (error instanceof LockBusyError)
         throw new SyncAgentError("conflict", "project_busy", error.message);
@@ -873,9 +896,34 @@ export class SyncAgent {
     });
   }
 
-  private projectDirectory(project: AgentProject, kind: string): string {
-    const root = join(this.config.transactionPath, project.id);
-    return kind === "" ? root : join(root, kind);
+  private projectDirectory(
+    project: AgentProject,
+    kind: string,
+    root = this.config.transactionPath,
+  ): string {
+    const directory = join(root, project.id);
+    return kind === "" ? directory : join(directory, kind);
+  }
+
+  // State from before sync state was kept per runner belongs to the first
+  // runner that proves it knows it, by naming the same base. Anything else
+  // leaves it where it is.
+  private async adoptLegacyState(request: SyncRequest, project: AgentProject): Promise<void> {
+    const legacy = this.config.legacyTransactionPath;
+    if (!legacy || legacy === this.config.transactionPath) return;
+    const runnerBase = request.payload.runnerBase;
+    if (typeof runnerBase !== "string" || (await this.base(project)) !== null) return;
+    if ((await readJson<string | null>(this.stateFile(project, legacy), null)) !== runnerBase)
+      return;
+    await moveInto(this.projectDirectory(project, "", legacy), this.projectDirectory(project, ""));
+    const legacyBackups = this.config.legacyBackupPath;
+    if (legacyBackups && legacyBackups !== this.config.backupPath)
+      await moveInto(join(legacyBackups, project.id), join(this.config.backupPath, project.id));
+    const nonces = await readJson<string[]>(
+      join(this.projectDirectory(project, "transactions"), "nonces.json"),
+      [],
+    );
+    for (const nonce of nonces) this.usedNonces.add(nonce);
   }
 
   private async reconcileBase(
@@ -898,16 +946,16 @@ export class SyncAgent {
     return runnerBase;
   }
 
-  private stateFile(project: AgentProject): string {
-    return this.projectDirectory(project, join("state", "base.json"));
+  private stateFile(project: AgentProject, root?: string): string {
+    return this.projectDirectory(project, join("state", "base.json"), root);
   }
 
   private async base(project: AgentProject): Promise<string | null> {
     return readJson<string | null>(this.stateFile(project), null);
   }
 
-  private async setBase(project: AgentProject, value: string): Promise<void> {
-    await writeJson(this.stateFile(project), value);
+  private async setBase(project: AgentProject, value: string, root?: string): Promise<void> {
+    await writeJson(this.stateFile(project, root), value);
   }
 
   private requiredHead(value: string | null | undefined, name: string): string {
@@ -930,6 +978,34 @@ export class SyncAgentError extends Error {
   ) {
     super(message);
     this.name = "SyncAgentError";
+  }
+}
+
+// Moves a directory tree into place. Where both sides hold the same file, the
+// target's copy wins, except JSON lists such as nonces and history, which are
+// joined with the source's entries first.
+async function moveInto(source: string, target: string): Promise<void> {
+  const from = await stat(source).catch(() => null);
+  if (!from) return;
+  const to = await stat(target).catch(() => null);
+  if (!to) {
+    await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+    await rename(source, target);
+    return;
+  }
+  if (from.isDirectory() && to.isDirectory()) {
+    for (const entry of await readdir(source))
+      await moveInto(join(source, entry), join(target, entry));
+    await rmdir(source).catch(() => undefined);
+    return;
+  }
+  if (from.isFile() && to.isFile() && source.endsWith(".json")) {
+    const older = await readJson<unknown[] | null>(source, null);
+    const newer = await readJson<unknown[] | null>(target, null);
+    if (Array.isArray(older) && Array.isArray(newer)) {
+      await writeJson(target, [...older, ...newer]);
+      await rm(source, { force: true });
+    }
   }
 }
 
