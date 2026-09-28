@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { createServer, type Server } from "node:http";
+import { createServer, request as httpRequest, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Duplex } from "node:stream";
@@ -271,5 +271,78 @@ test("HMR on the public gateway follows the line being served", async () => {
     await app.close();
     await close(first);
     await close(line);
+  }
+});
+
+test("a preview socket reaches a dev server that takes sockets only from localhost", async () => {
+  const origins: (string | undefined)[] = [];
+  const sockets: Duplex[] = [];
+  // Next.js answers a live-reload socket from any other origin with a bare
+  // word, not an HTTP response.
+  const dev = createServer();
+  dev.on("upgrade", (incoming, socket) => {
+    origins.push(incoming.headers.origin);
+    sockets.push(socket);
+    if (new URL(incoming.headers.origin ?? "http://unknown").hostname !== "localhost") {
+      socket.end("Unauthorized");
+      return;
+    }
+    socket.write(
+      "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+    );
+  });
+  const devPort = await bind(dev);
+  const config = project({ devPort });
+  const app = await createNautilusApp({
+    registryPath: ":memory:",
+    authSecret: testSecret,
+    projects: [config],
+    logger: new Logger(() => undefined),
+  });
+  const gateway = createNautilusGateway({
+    apiTarget: "http://127.0.0.1:1",
+    auth: app.auth,
+    logger: new Logger(() => undefined),
+    previewTokens: app.previewTokens,
+    registry: app.registry,
+    secureCookies: false,
+    webTarget: "http://127.0.0.1:1",
+  });
+  const gatewayPort = await bind(gateway.server);
+  app.registry.setActiveProjectId("demo");
+  app.registry.setActiveDevTarget("demo", `http://127.0.0.1:${String(devPort)}`);
+
+  try {
+    const token = app.previewTokens.issue(config, 60);
+    const status = await new Promise<number>((resolve, reject) => {
+      const upgrade = httpRequest({
+        host: "127.0.0.1",
+        port: gatewayPort,
+        path: `/preview/demo/_next/webpack-hmr?token=${encodeURIComponent(token.token)}`,
+        headers: {
+          connection: "Upgrade",
+          upgrade: "websocket",
+          origin: `http://127.0.0.1:${String(gatewayPort)}`,
+          "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+          "sec-websocket-version": "13",
+        },
+      });
+      upgrade.on("upgrade", (response, socket) => {
+        socket.destroy();
+        resolve(response.statusCode ?? 0);
+      });
+      upgrade.on("response", (response) => {
+        resolve(response.statusCode ?? 0);
+      });
+      upgrade.on("error", reject);
+      upgrade.end();
+    });
+    expect(status).toBe(101);
+    expect(origins).toEqual([`http://localhost:${String(devPort)}`]);
+  } finally {
+    sockets.forEach((entry) => entry.destroy());
+    await gateway.close();
+    await app.close();
+    await close(dev);
   }
 });
