@@ -239,7 +239,10 @@ export class ShadowGit {
     // misleading "spawn git ENOENT", so a missing project folder is named here.
     const workTree = await stat(this.workTree).catch(() => undefined);
     if (!workTree?.isDirectory()) {
-      throw new ShadowGitError("worktree_missing", `project folder ${this.workTree} does not exist`);
+      throw new ShadowGitError(
+        "worktree_missing",
+        `project folder ${this.workTree} does not exist`,
+      );
     }
     await mkdir(dirname(this.indexPath), { recursive: true, mode: 0o700 });
     await mkdir(this.gitDir, { recursive: true, mode: 0o700 });
