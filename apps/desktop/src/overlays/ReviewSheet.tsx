@@ -33,6 +33,7 @@ type ReviewView = {
   allResolved: boolean;
   unresolved: number;
   canApply: boolean;
+  firstSync: boolean;
 };
 
 function reviewView(review: Review | null): ReviewView | null {
@@ -56,6 +57,7 @@ function reviewView(review: Review | null): ReviewView | null {
     allResolved,
     unresolved: conflicts.filter((conflict) => !(conflict.path in review.resolutions)).length,
     canApply: open && ((review.phase === "ready" && fileCount > 0) || (resolving && allResolved)),
+    firstSync: review.preview?.status === "ok" && review.preview.state?.baseHead === null,
   };
 }
 
@@ -244,6 +246,15 @@ function ReviewBody({
 function ReadyBody({ view }: { view: ReviewView }) {
   if (view.fileCount === 0) {
     return <Text color="secondary">{reviewText.alreadyMatch}</Text>;
+  }
+  if (view.firstSync) {
+    return (
+      <Banner
+        status="info"
+        title={reviewText.firstSync[view.review.direction](view.fileCount)}
+        description={reviewText.firstSyncNote}
+      />
+    );
   }
   const summary = view.diff
     ? ` (+${String(view.diff.additions)} −${String(view.diff.deletions)})`
