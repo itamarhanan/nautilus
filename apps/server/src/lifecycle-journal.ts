@@ -54,6 +54,13 @@ export class LifecycleJournal {
     this.degradedProjects.add(projectId);
   }
 
+  async clearDegradedProject(projectId: string): Promise<void> {
+    if (!this.degradedProjects.delete(projectId)) return;
+    if (this.state === "degraded" && this.degradedProjects.size === 0) {
+      await this.transition("ready");
+    }
+  }
+
   async recordService(
     service: NonNullable<JournalEvent["service"]>,
     action: "start" | "stop",

@@ -432,8 +432,30 @@ export class Registry {
       .run(now(), now(), id);
   }
 
+  // The schema cascades from projects, but a registry created before a table
+  // gained its foreign key would keep orphans, so every row is named here.
   deleteProject(id: string): void {
-    this.db.prepare("DELETE FROM projects WHERE id = ?").run(id);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const table of [
+        "agent_session_events",
+        "agent_sessions",
+        "preview_sessions",
+        "preview_tokens",
+      ]) {
+        this.db.prepare(`DELETE FROM ${table} WHERE project_id = ?`).run(id);
+      }
+      this.db
+        .prepare(
+          "DELETE FROM server_state WHERE key = ? OR (key = 'active_project_id' AND value = ?)",
+        )
+        .run(`dev_target:${id}`, id);
+      this.db.prepare("DELETE FROM projects WHERE id = ?").run(id);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   createAgentSession(projectId: string, openCodeSessionId: string, title: string): SessionRecord {

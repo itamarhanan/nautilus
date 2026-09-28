@@ -1,5 +1,5 @@
-import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, mkdir, realpath, rm } from "node:fs/promises";
+import { isAbsolute, join, relative, sep } from "node:path";
 import type { ProjectConfig } from "@nautilus/types";
 import { ConfigurationError, derivePreviewOrigin, parseProjectConfig } from "../config";
 import { HttpError } from "../errors";
@@ -26,8 +26,41 @@ function projectConfig(value: unknown): ProjectConfig {
   }
 }
 
+// Only a real directory strictly inside the projects root is removed. A path
+// given at registration may point anywhere, so a symlink, the root itself, or
+// anything that resolves outside it is left on disk.
+async function removeProjectFolder(remotePath: string, projectsRoot: string): Promise<boolean> {
+  try {
+    const entry = await lstat(remotePath).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    });
+    if (entry === null) return true;
+    if (!entry.isDirectory()) return false;
+    const [root, target] = await Promise.all([realpath(projectsRoot), realpath(remotePath)]);
+    const inside = relative(root, target);
+    if (!inside || inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside)) {
+      return false;
+    }
+    await rm(target, { recursive: true, force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function projectRoutes(context: AppContext): Route[] {
-  const { registry, projectMap, projectManager, previewTokens, sync, limiters, settings } = context;
+  const {
+    registry,
+    projectMap,
+    projectManager,
+    previewTokens,
+    sync,
+    lifecycle,
+    logger,
+    limiters,
+    settings,
+  } = context;
   return [
     {
       method: "GET",
@@ -122,14 +155,41 @@ export function projectRoutes(context: AppContext): Route[] {
       method: "DELETE",
       path: "/api/projects/:projectId",
       access: "admin",
-      handle: ({ response, params }) => {
+      handle: async ({ response, params }) => {
         const project = requireProject(context, params.projectId);
         if (project.state === "running" || project.state === "starting") {
           throw new HttpError(409, "project_running", "Stop the project before deleting it");
         }
+        if (
+          project.state === "editing" ||
+          project.state === "checkpointing" ||
+          registry.listAgentSessions(project.id).some((session) => session.status === "running")
+        ) {
+          throw new HttpError(
+            409,
+            "agent_running",
+            "Wait for the agent to finish, or stop it, before deleting the project",
+          );
+        }
+
+        // Leaving the map first means no prompt, start or sync can pick the
+        // project up while its files are being removed.
+        const configured = projectMap.get(project.id);
+        projectMap.delete(project.id);
+        try {
+          await sync?.removeProject(project.id);
+        } catch (error) {
+          if (configured) projectMap.set(project.id, configured);
+          throw error;
+        }
+        await projectManager.stop(project.id);
         registry.deleteProject(project.id);
+        await lifecycle.clearDegradedProject(project.id);
+        if (!(await removeProjectFolder(project.remotePath, settings.projectsRoot))) {
+          logger.info("project_folder_kept", { projectId: project.id });
+        }
         sendJson(response, 204, null);
-        return Promise.resolve(204);
+        return 204;
       },
     },
     {

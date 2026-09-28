@@ -263,6 +263,21 @@ export class SyncCoordinator {
     this.projects.set(project.id, project);
   }
 
+  // Runs under the project's lock, so a sync still in flight refuses the removal
+  // with project_busy instead of losing its shadow repository mid-transaction.
+  // The lock file itself is released, and so removed, once the action returns.
+  async removeProject(projectId: string): Promise<void> {
+    await this.withLock(projectId, async () => {
+      this.projects.delete(projectId);
+      this.gitByProject.delete(projectId);
+      await rm(join(this.options.shadowRoot, `${projectId}.git`), {
+        recursive: true,
+        force: true,
+      });
+      await rm(this.projectState(projectId), { recursive: true, force: true });
+    });
+  }
+
   connect(hooks: Pick<CoordinatorOptions, "onEvent" | "onFirstSync" | "busy">): void {
     Object.assign(this.options, hooks);
   }

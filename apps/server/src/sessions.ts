@@ -238,6 +238,9 @@ export class SessionService {
       return;
     }
     const { session, subagent } = owner;
+    // A project being deleted leaves the project map before its sessions leave
+    // the registry; events that land in between have nowhere to go.
+    if (!this.projects.has(session.projectId)) return;
 
     if ((event.payload.type as string) === DELTA_EVENT) {
       this.publishDelta(session, event.payload, subagent);
