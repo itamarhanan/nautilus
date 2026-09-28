@@ -1,6 +1,7 @@
 import { agent as agentText } from "@nautilus/copy";
 import { AgentApi } from "./api";
 import type { RunningProcess, Spawner } from "./process";
+import type { DesktopSettings } from "./settings";
 import { localAgentPort } from "./ssh";
 
 export type AgentPhase = "stopped" | "starting" | "running" | "error";
@@ -14,6 +15,24 @@ export function createLaunchKey(
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+// Names the runner the agent syncs with, so the PC keeps a separate base and
+// history for each one. It must match the agent's ^[a-z0-9-]{1,64}$.
+export async function runnerKey(settings: DesktopSettings, localMode: boolean): Promise<string> {
+  if (localMode) return "local";
+  let origin: string;
+  try {
+    origin = new URL(settings.runnerUrl.trim()).origin.toLowerCase();
+  } catch {
+    return "unset";
+  }
+  const digest = new Uint8Array(
+    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(origin)),
+  );
+  let hex = "";
+  for (const byte of digest.slice(0, 8)) hex += byte.toString(16).padStart(2, "0");
+  return `runner-${hex}`;
 }
 
 export type AgentOptions = {
@@ -34,6 +53,7 @@ export class AgentProcess {
   private readonly listeners = new Set<(snapshot: AgentSnapshot) => void>();
   private api: AgentApi | undefined;
   private starting: Promise<AgentApi> | undefined;
+  private runner = "unset";
 
   constructor(private readonly options: AgentOptions) {}
 
@@ -51,15 +71,26 @@ export class AgentProcess {
     return () => this.listeners.delete(listener);
   }
 
-  start(): Promise<AgentApi> {
-    if (this.process && this.api) return Promise.resolve(this.api);
-    this.starting ??= this.launch().finally(() => {
+  get runnerKey(): string {
+    return this.runner;
+  }
+
+  // Starts the agent for a runner, or keeps the running one. A different
+  // runner restarts it, since the agent reads its runner once at launch.
+  async start(runnerKey = this.runner): Promise<AgentApi> {
+    if (runnerKey !== this.runner) {
+      await this.starting?.catch(() => undefined);
+      this.runner = runnerKey;
+      if (this.process) await this.stop();
+    }
+    if (this.process && this.api) return this.api;
+    this.starting ??= this.launch(this.runner).finally(() => {
       this.starting = undefined;
     });
     return this.starting;
   }
 
-  private async launch(): Promise<AgentApi> {
+  private async launch(runnerKey: string): Promise<AgentApi> {
     this.update({ phase: "starting", error: null });
     const leftover = this.options.previous?.read() ?? null;
     if (leftover !== null) {
@@ -102,13 +133,14 @@ export class AgentProcess {
             }
           },
         },
-        this.options.devOrigins?.length
-          ? {
-              env: {
-                NAUTILUS_AGENT_ORIGINS: this.options.devOrigins.join(","),
-              },
-            }
-          : undefined,
+        {
+          env: {
+            NAUTILUS_AGENT_RUNNER: runnerKey,
+            ...(this.options.devOrigins?.length
+              ? { NAUTILUS_AGENT_ORIGINS: this.options.devOrigins.join(",") }
+              : {}),
+          },
+        },
       );
     } catch {
       this.update({

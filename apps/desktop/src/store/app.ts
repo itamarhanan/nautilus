@@ -1,3 +1,4 @@
+import { runnerKey } from "../lib/agent";
 import { friendlyError, messageOf } from "../lib/errors";
 import { settingsComplete, validateSettings } from "../lib/settings";
 import type { StoreRuntime } from "./runtime";
@@ -19,6 +20,23 @@ export function appSlice(
 
   let initialized = false;
   let noticeCounter = 0;
+
+  // The PC keeps a base per runner, so a new runner means a new agent. A
+  // review planned against the old runner cannot finish against the new one.
+  const followRunner = async () => {
+    const process = runtime.agentProcess;
+    if (!process) return;
+    const key = await runnerKey(get().settings, services.localMode);
+    if (key === process.runnerKey) return;
+    if (get().review) {
+      set({ review: null });
+      await runtime.session?.close();
+      runtime.session = undefined;
+    }
+    await process.start(key);
+    await get().refreshStatus();
+  };
+
   return {
     init: async () => {
       if (initialized) return;
@@ -60,7 +78,7 @@ export function appSlice(
           process.subscribe((agent) => {
             set({ agent });
           });
-          return process.start();
+          return runnerKey(get().settings, services.localMode).then((key) => process.start(key));
         })
         .then(() => get().refreshStatus())
         .catch(() => undefined);
@@ -92,6 +110,7 @@ export function appSlice(
       const rootsChanged = candidate.projectRoots.join("\n") !== previous.projectRoots.join("\n");
       set({ settings: candidate, settingsExist: true });
       if (rootsChanged) void get().scan(true);
+      void followRunner().catch(() => undefined);
       return null;
     },
 
