@@ -170,11 +170,22 @@ export function createNautilusGateway(options: GatewayOptions): NautilusGateway 
     return token ? options.previewTokens.redeem(token) : undefined;
   }
 
-  function preparePreviewRequest(request: IncomingMessage, target: string): void {
+  function preparePreviewRequest(request: IncomingMessage, target: string, upgrade = false): void {
     const sameOrigin = isSameOrigin(request);
     delete request.headers.authorization;
     delete request.headers.cookie;
-    if (sameOrigin) request.headers.origin = target;
+    if (!sameOrigin) return;
+    // Next.js takes a live-reload socket only from localhost and answers any
+    // other origin with a bare word instead of HTTP, so a socket names
+    // localhost. A plain request keeps the target, so its origin matches its
+    // host for the dev server's own form checks.
+    if (upgrade) {
+      const local = new URL(target);
+      local.hostname = "localhost";
+      request.headers.origin = local.origin;
+    } else {
+      request.headers.origin = target;
+    }
   }
 
   function proxyRequest(request: IncomingMessage, response: ServerResponse, target: Target): void {
@@ -340,7 +351,7 @@ export function createNautilusGateway(options: GatewayOptions): NautilusGateway 
       }
       redeemedToken = true;
     }
-    preparePreviewRequest(request, target);
+    preparePreviewRequest(request, target, true);
 
     proxyWebSocket(request, socket, head, {
       target,
