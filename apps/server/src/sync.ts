@@ -20,6 +20,7 @@ import {
   pruneFiles,
   readJson,
   ShadowGit,
+  ShadowGitError,
   withLock,
   writeJson,
   type ShadowGitLimits,
@@ -844,7 +845,15 @@ export class SyncCoordinator {
 
   async recover(projectId: string): Promise<void> {
     const project = this.project(projectId);
-    const git = await this.git(project);
+    let git: ShadowGit;
+    try {
+      git = await this.git(project);
+    } catch (error) {
+      // Nothing can be rolled back into a folder that is gone; validation marks
+      // the project unhealthy instead of the whole runner failing to start.
+      if (error instanceof ShadowGitError && error.code === "worktree_missing") return;
+      throw error;
+    }
     const directory = this.stateDir(projectId, "transactions");
     for (const entry of await readdir(directory).catch(() => [])) {
       if (!entry.endsWith(".json")) continue;
@@ -875,7 +884,17 @@ export class SyncCoordinator {
     const results = new Map<string, ShadowGitValidation>();
     await Promise.all(
       [...this.projects.values()].map(async (project) => {
-        results.set(project.id, await (await this.git(project)).validate());
+        try {
+          results.set(project.id, await (await this.git(project)).validate());
+        } catch (error) {
+          // One project that cannot be opened is reported, not a failed boot.
+          results.set(project.id, {
+            valid: false,
+            dirty: false,
+            head: null,
+            error: error instanceof ShadowGitError ? error.code : "shadow_validation_failed",
+          });
+        }
       }),
     );
     return results;
