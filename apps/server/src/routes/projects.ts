@@ -15,6 +15,19 @@ function allocateDevPort(used: Set<number>, [low, high]: [number, number]): numb
   throw new HttpError(409, "dev_ports_exhausted", "No free dev-server port is left in the range");
 }
 
+// Only a plain web origin is kept, so a stray header binds a token to nothing.
+function requestOrigin(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    return (url.protocol === "https:" || url.protocol === "http:") && url.origin === value
+      ? value
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function projectConfig(value: unknown): ProjectConfig {
   try {
     return parseProjectConfig(value);
@@ -202,7 +215,7 @@ export function projectRoutes(context: AppContext): Route[] {
         const ttlSeconds = body.ttlSeconds === undefined ? 120 : Number(body.ttlSeconds);
         let issued: ReturnType<typeof previewTokens.issue>;
         try {
-          issued = previewTokens.issue(project, ttlSeconds);
+          issued = previewTokens.issue(project, ttlSeconds, requestOrigin(request.headers.origin));
         } catch (error) {
           throw new HttpError(
             400,

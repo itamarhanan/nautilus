@@ -5,6 +5,9 @@ type PreviewTokenPayload = {
   projectId: ProjectId;
   expiresAt: number;
   tokenId: string;
+  // The app page that asked for the token, which may redeem it on the preview
+  // origin in its place.
+  origin?: string;
 };
 
 export type RedeemedPreview = {
@@ -44,6 +47,7 @@ function parsePayload(value: string): PreviewTokenPayload | undefined {
       projectId: payload.projectId,
       expiresAt: payload.expiresAt,
       tokenId: payload.tokenId,
+      ...(typeof payload.origin === "string" ? { origin: payload.origin } : {}),
     };
   } catch {
     return undefined;
@@ -75,7 +79,7 @@ export class PreviewTokens {
     }
   }
 
-  issue(project: ProjectConfig, ttlSeconds = 120): PreviewTokenResponse {
+  issue(project: ProjectConfig, ttlSeconds = 120, origin?: string): PreviewTokenResponse {
     if (!Number.isInteger(ttlSeconds) || ttlSeconds < 30 || ttlSeconds > 300) {
       throw new Error("Preview token TTL must be between 30 and 300 seconds");
     }
@@ -83,6 +87,7 @@ export class PreviewTokens {
       projectId: project.id,
       expiresAt: Math.floor(Date.now() / 1000) + ttlSeconds,
       tokenId: randomUUID(),
+      ...(origin ? { origin } : {}),
     };
     const encodedPayload = Buffer.from(JSON.stringify(payload)).toString("base64url");
     const signature = sign(encodedPayload, this.secret).toString("base64url");
@@ -98,6 +103,10 @@ export class PreviewTokens {
 
   verify(token: string): ProjectId | undefined {
     return this.parseValid(token)?.projectId;
+  }
+
+  issuedFor(token: string): string | undefined {
+    return this.parseValid(token)?.origin;
   }
 
   redeem(token: string): RedeemedPreview | undefined {

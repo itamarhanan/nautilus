@@ -291,10 +291,15 @@ export function createNautilusGateway(options: GatewayOptions): NautilusGateway 
         response.end(redeemPage);
         return;
       }
+      // The page above posts the token back itself. The app page that asked for
+      // the token may post it too, so an embedded preview needs no extra page.
+      const allowed =
+        isSameOrigin(request) ||
+        (token !== null &&
+          request.headers.origin !== undefined &&
+          options.previewTokens.issuedFor(token) === request.headers.origin);
       const redeemed =
-        request.method === "POST" && isSameOrigin(request)
-          ? redeemPreviewToken(request)
-          : undefined;
+        request.method === "POST" && allowed ? redeemPreviewToken(request) : undefined;
       if (!redeemed || redeemed.projectId !== scope.projectId) {
         sendError(response, 401, "preview_unauthorized", "Preview authentication is required");
         return;
