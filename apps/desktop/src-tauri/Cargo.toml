@@ -2,8 +2,8 @@
 name = "nautilus-desktop"
 version = "0.0.0"
 license = "GPL-3.0-only"
-description = "Nautilus desktop app: run coding agents from your phone."
-authors = ["Nautilus"]
+description = "Nautilus desktop app: run a coding agent from your phone and bring the work home to your PC."
+authors = ["Itamar Hanan"]
 edition = "2021"
 
 [build-dependencies]

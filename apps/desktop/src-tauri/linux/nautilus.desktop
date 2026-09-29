@@ -7,6 +7,6 @@ Exec={{exec}}
 StartupWMClass={{exec}}
 Icon={{icon}}
 Name=Nautilus
-Keywords=coding;agent;remote;sync;
+Keywords=coding;agent;phone;remote;sync;diff;merge;git;
 Terminal=false
 Type=Application
