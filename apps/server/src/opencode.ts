@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { accessSync, constants, readFileSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { createConnection } from "node:net";
+import { createConnection, createServer, type AddressInfo } from "node:net";
 import { dirname, join } from "node:path";
 import {
   createOpencodeClient,
@@ -49,7 +49,7 @@ export type OpenCodeProcessOptions = {
 
 export class OpenCodeProcess implements OpenCodeService {
   private readonly host: string;
-  private readonly port: number;
+  private port: number;
   private readonly dataDir: string;
   private readonly startupTimeoutMs: number;
   private readonly binary: string;
@@ -87,12 +87,12 @@ export class OpenCodeProcess implements OpenCodeService {
     await mkdir(this.dataDir, { recursive: true, mode: 0o700 });
     await this.stopLeftover();
 
+    // A leftover of this runner is gone by now, so whatever holds the port is
+    // not ours, such as the OpenCode of a runner hosting this one.
     if (await portAnswers(this.host, this.port)) {
-      this.logger.error("opencode_port_in_use", {
-        host: this.host,
-        port: this.port,
-      });
-      throw new Error(`OpenCode port ${String(this.port)} is already in use by another process`);
+      const port = await freePort(this.host);
+      this.logger.warn("opencode_port_moved", { host: this.host, from: this.port, to: port });
+      this.port = port;
     }
     const startedAt = Date.now();
     this.logger.info("opencode_starting", {
@@ -388,6 +388,19 @@ function boundedFetch(request: Request): Promise<Response> {
   if (new URL(request.url).pathname.endsWith("/event")) return fetch(request);
   return fetch(request, {
     signal: AbortSignal.any([request.signal, AbortSignal.timeout(requestTimeoutMs)]),
+  });
+}
+
+function freePort(host: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once("error", reject);
+    server.listen(0, host, () => {
+      const { port } = server.address() as AddressInfo;
+      server.close(() => {
+        resolve(port);
+      });
+    });
   });
 }
 

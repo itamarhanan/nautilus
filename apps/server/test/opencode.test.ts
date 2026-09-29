@@ -61,7 +61,7 @@ test("createSession returns the session OpenCode created", async () => {
   }
 });
 
-test("a port held by a server the runner did not start is refused", async () => {
+test("a port held by a server the runner did not start moves OpenCode to a free one", async () => {
   const { root, binary, dataDir } = await fixture();
   const foreign = createServer((_, response) => response.end("{}"));
   await new Promise<void>((resolve) => foreign.listen(0, "127.0.0.1", resolve));
@@ -73,7 +73,9 @@ test("a port held by a server the runner did not start is refused", async () => 
     port,
   });
   try {
-    await expect(openCode.start()).rejects.toThrow(/already in use/);
+    await openCode.start();
+    const session = await openCode.createSession(root, "First turn");
+    expect(session.id).toBe("ses_fake");
   } finally {
     await openCode.close();
     await new Promise<void>((resolve) =>
