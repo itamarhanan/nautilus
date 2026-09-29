@@ -1,3 +1,4 @@
+import type { AddressInfo } from "node:net";
 import { createNautilusApp } from "./app";
 import { loadProjects, loadServerOptions } from "./config";
 import { createNautilusGateway } from "./gateway";
@@ -32,14 +33,17 @@ async function main(): Promise<void> {
   });
   const app = await createNautilusApp({ logger, projects, openCode, sync });
   await new Promise<void>((resolve) => app.server.listen(options.port, options.host, resolve));
-  logger.info("server_started", { host: options.host, port: options.port });
+  // A runner hosted by another runner may be moved off its port, so the
+  // gateway follows the one it got.
+  const { port: apiPort } = app.server.address() as AddressInfo;
+  logger.info("server_started", { host: options.host, port: apiPort });
   await new Promise<void>((resolve) =>
     app.controlServer.listen(options.controlPort, options.controlHost, resolve),
   );
   logger.info("control_started", { host: options.controlHost, port: options.controlPort });
   await app.lifecycle.recordService("server", "start");
   const gateway = createNautilusGateway({
-    apiTarget: `http://127.0.0.1:${String(options.port)}`,
+    apiTarget: `http://127.0.0.1:${String(apiPort)}`,
     auth: app.auth,
     heartbeatMs: options.sseHeartbeatMs,
     logger,
