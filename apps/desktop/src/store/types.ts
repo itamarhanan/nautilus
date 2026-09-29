@@ -108,6 +108,7 @@ export type DesktopActions = {
   setPaletteOpen: (open: boolean) => void;
   setLinkPhoneOpen: (open: boolean) => void;
   refreshRunner: () => Promise<void>;
+  refreshProjects: () => Promise<void>;
   refreshStatus: (projectId?: string) => Promise<void>;
 
   refreshHistory: (projectId?: string) => Promise<void>;

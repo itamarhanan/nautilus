@@ -56,6 +56,7 @@ export function runnerSlice(
 ): Pick<
   DesktopActions,
   | "refreshRunner"
+  | "refreshProjects"
   | "refreshStatus"
   | "refreshHistory"
   | "newPairingCode"
@@ -175,6 +176,18 @@ export function runnerSlice(
         set({
           pairingError: messageOf(error, "Could not create a pairing code"),
         });
+      }
+    },
+
+    refreshProjects: async () => {
+      const api = control();
+      if (!api) return;
+      try {
+        set({ projects: await api.projects() });
+      } catch {
+        // A phone or the runner itself starts and stops dev servers, so the
+        // project list is polled like the device list, and a failed poll keeps
+        // the last one on screen.
       }
     },
 

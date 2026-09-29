@@ -123,6 +123,7 @@ function useStatusPolling(
   connected: boolean,
   onHome: boolean,
   selectedId: string | null,
+  refreshProjects: () => Promise<void>,
   refreshStatus: (projectId?: string) => Promise<void>,
   refreshHistory: () => Promise<void>,
   refreshDevices: () => Promise<void>,
@@ -131,9 +132,11 @@ function useStatusPolling(
     if (!connected) return;
     const refresh = () => {
       const everything = onHome || document.visibilityState !== "visible";
+      void refreshProjects();
       void refreshStatus(everything ? undefined : (selectedId ?? undefined));
     };
     const onFocus = () => {
+      void refreshProjects();
       void refreshStatus();
       void refreshDevices();
       if (onHome) void refreshHistory();
@@ -144,7 +147,15 @@ function useStatusPolling(
       window.clearInterval(timer);
       window.removeEventListener("focus", onFocus);
     };
-  }, [connected, onHome, selectedId, refreshStatus, refreshHistory, refreshDevices]);
+  }, [
+    connected,
+    onHome,
+    selectedId,
+    refreshProjects,
+    refreshStatus,
+    refreshHistory,
+    refreshDevices,
+  ]);
 }
 
 export default function App() {
@@ -212,6 +223,7 @@ function Shell() {
   const route = useApp((state) => state.route);
   const projects = useApp((state) => state.appState.projects);
   const selectedId = useApp((state) => state.selectedProjectId);
+  const refreshProjects = useApp((state) => state.refreshProjects);
   const refreshStatus = useApp((state) => state.refreshStatus);
   const refreshHistory = useApp((state) => state.refreshHistory);
   const refreshDevices = useApp((state) => state.refreshDevices);
@@ -243,7 +255,15 @@ function Shell() {
   useShortcuts(context, actions);
 
   const onHome = route.name !== "project";
-  useStatusPolling(connected, onHome, selectedId, refreshStatus, refreshHistory, refreshDevices);
+  useStatusPolling(
+    connected,
+    onHome,
+    selectedId,
+    refreshProjects,
+    refreshStatus,
+    refreshHistory,
+    refreshDevices,
+  );
 
   const selected = projects.find((project) => project.id === selectedId);
 
