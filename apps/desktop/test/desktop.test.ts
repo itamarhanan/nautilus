@@ -1426,6 +1426,31 @@ describe("desktop store", () => {
     });
   });
 
+  it("clears a runner problem once a phone restarts the project, and keeps it through a failed poll", async () => {
+    const { value, control } = services();
+    const failed = {
+      id: "shop",
+      name: "Shop",
+      devCommand: "pnpm dev",
+      state: "error",
+      lastError: "dev_process_exited",
+    };
+    control.projects.mockResolvedValue([failed]);
+    const store = createDesktopStore(value);
+    await store.getState().init();
+    await store.getState().refreshRunner();
+    expect(store.getState().projects).toEqual([failed]);
+
+    control.projects.mockRejectedValueOnce(new Error("offline"));
+    await store.getState().refreshProjects();
+    expect(store.getState().projects).toEqual([failed]);
+
+    const running = { ...failed, state: "running", lastError: null };
+    control.projects.mockResolvedValue([running]);
+    await store.getState().refreshProjects();
+    expect(store.getState().projects).toEqual([running]);
+  });
+
   it("creates a phone link without any project", async () => {
     const { value } = services();
     const store = createDesktopStore(value);
