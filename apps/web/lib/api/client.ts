@@ -9,8 +9,10 @@ export class ApiError extends Error {
   }
 }
 
+// Only the runner's own rejection signs the phone out. A 401 from the proxy in
+// front of it, such as while the Studio wakes up, just means it is unreachable.
 export function isUnauthorized(error: unknown): boolean {
-  return error instanceof ApiError && error.status === 401;
+  return error instanceof ApiError && error.status === 401 && error.code === "unauthorized";
 }
 
 export function errorMessage(error: unknown, fallback: string): string {
