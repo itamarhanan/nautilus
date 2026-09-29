@@ -336,8 +336,11 @@ The Release workflow builds the installers on Linux, macOS and Windows runners a
 # 1. Set "version" in apps/desktop/package.json, e.g. 0.2.0, and commit it.
 # 2. Tag that commit with the same version and push the tag:
 git tag v0.2.0 && git push origin v0.2.0
-# 3. When the workflow finishes, check the files on the draft and publish it.
+# 3. When the workflow finishes, write the summary line at the top of the
+#    draft's notes, check the files and publish it.
 ```
+
+The draft's notes come from `scripts/release-notes.sh`, which lists the new features and fixes since the previous tag, grouped by the part of Nautilus they touch, and adds the install table. Run it locally to preview a release's notes: `scripts/release-notes.sh v0.2.0`.
 
 The workflow refuses a tag that does not match the version. Linux ships a `.deb` and an AppImage but no `.rpm`: the app carries a whole Node runtime, and Tauri's RPM packer compresses it slowly enough to stall a build.
 
