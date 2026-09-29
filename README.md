@@ -3,25 +3,26 @@
 [![CI](https://github.com/itamarhanan/nautilus/actions/workflows/ci.yml/badge.svg)](https://github.com/itamarhanan/nautilus/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](./LICENSE)
 
-**Run a coding agent from your phone. Bring the work home to your PC.**
+![Nautilus: run a coding agent from your phone. Bring the work home to your PC.](./docs/media/banner.png)
 
 Nautilus pairs an installable phone PWA with a free cloud runner. You prompt an agent, watch it work and check a live preview of the result, from a phone, on a train, with your laptop closed. Back at your desk, a desktop app shows you a real diff and merges the agent's work into your project. It never touches your `.git` directory.
 
 The whole thing runs on infrastructure that costs nothing. There is no credit card, no domain, no Docker and no paid VM, and one public HTTPS port carries the app, the API and the preview.
 
-```
-   phone (PWA)                        free cloud runner                     your PC
-  ┌────────────┐                ┌───────────────────────────┐          ┌──────────────┐
-  │  chat      │  HTTPS :8080   │  gateway ─┬─ PWA   :4002  │          │  Tauri app   │
-  │  preview   │◄──────────────►│           ├─ API   :4000  │          │      ▲       │
-  │  history   │   (one origin) │           ├─ ctrl  :4001 ◄┼──────────┤  local fwd   │
-  └────────────┘                │           └─ prev  :8081  │  SSH     │      │       │
-                                │             opencode 4096 │          │  ┌───────────┤
-                                │             dev srv  31xx │          │  │ sync-agent│
-                                │            shadow git repo│◄─────────┼──┤ 127.0.0.1 │
-                                └───────────────────────────┘  rev SSH │  │ :4100     │
-                                                                    └──┴──┴───────────┘
-```
+## Quick start
+
+1. **Install the desktop app** from the [latest release](https://github.com/itamarhanan/nautilus/releases/latest). See [the table below](#install-the-desktop-app) for which file to pick.
+2. **Set up a runner** on a free [Lightning AI](https://lightning.ai) Studio. You need `git`, `curl`, `ssh` and Python 3 on the PC:
+
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/itamarhanan/nautilus/main/scripts/install.sh | bash
+   ```
+
+   It asks for your Lightning teamspace, deploys the runner and ends with a QR code. The free OpenCode Zen models work right away, and it prints how to sign in another provider.
+
+3. **Scan the QR code** with your phone and add the app to the home screen. Then, in the desktop app, open **Settings › Runner**, paste the public URL the installer printed, press **Detect**, then **Save and connect**.
+
+To try it on one machine first, see [everything on one machine](#option-b-everything-on-one-machine).
 
 ## The idea
 
@@ -44,6 +45,20 @@ On the phone you can also pick the model and, for models that have them, the rea
 
 Most of the engineering here is about what happens when things go wrong. The details are in [docs/architecture.md](./docs/architecture.md) and [docs/sync-protocol.md](./docs/sync-protocol.md). Here are the parts worth reading first.
 
+```
+   phone (PWA)                        free cloud runner                     your PC
+  ┌────────────┐                ┌───────────────────────────┐          ┌──────────────┐
+  │  chat      │  HTTPS :8080   │  gateway ─┬─ PWA   :4002  │          │  Tauri app   │
+  │  preview   │◄──────────────►│           ├─ API   :4000  │          │      ▲       │
+  │  history   │   (one origin) │           ├─ ctrl  :4001 ◄┼──────────┤  local fwd   │
+  └────────────┘                │           └─ prev  :8081  │  SSH     │      │       │
+                                │             opencode 4096 │          │  ┌───────────┤
+                                │             dev srv  31xx │          │  │ sync-agent│
+                                │            shadow git repo│◄─────────┼──┤ 127.0.0.1 │
+                                └───────────────────────────┘  rev SSH │  │ :4100     │
+                                                                    └──┴──┴───────────┘
+```
+
 ### The provider recycles the machine every four hours
 
 A free Lightning Studio restarts on a timer. Nautilus treats that as a full recycle, not a hiccup.
@@ -62,9 +77,9 @@ The agent's work needs history, checkpoints, three-way merges and undo. Your own
 - **What Git cannot round-trip is refused.** Symlinks, submodules, `.gitmodules`, Git LFS pointers and oversized files fail with a clear error. Dependencies, caches and `.env` files stay out. A nested checkout stays out too, and the desktop tells you once.
 - **Every agent turn is a checkpoint.** The phone lists the files each turn changed and can undo one turn while keeping the ones after it, the way `git revert` does. An undo is a checkpoint too, so it can be undone.
 
-### The PC holds no credential for the runner
+### The PC holds no Nautilus credential
 
-There is nothing on a laptop to steal and nothing to rotate.
+The only secret on the laptop is the Lightning SSH key, and Lightning issues and revokes it. Nautilus itself stores no token, password or API key on the PC, so there is nothing of its own to steal and nothing to rotate.
 
 - **The PC dials out.** A local SSH forward reaches the runner's control API while the app runs. A reverse forward exposes the PC's sync agent only during a sync. There is no public SSH daemon and no inbound port on your machine.
 - **The capability file is the desktop's security boundary.** The app can start exactly three programs, each with argument validators: `ssh` with a loopback-only local forward, `ssh` with one fixed reverse forward, and the sync agent binary that ships inside the app. The agent is a Node single executable, so the PC needs no Node install. The app reads only `~/.nautilus/**`, `~/.ssh/config` and `package.json` files, and makes HTTP requests only to `127.0.0.1`.
@@ -153,7 +168,11 @@ pnpm install
 ./scripts/install-opencode.sh   # Node and the pinned OpenCode build, SHA-256 checked
 ```
 
-### Option A: everything on one machine
+### Option A: the installer
+
+The [quick start](#quick-start) command needs none of the Node or pnpm setup above. It checks out the latest release into `~/.local/share/nautilus-runner`, saves your teamspace next to it and runs the steps in Option C for you: `deploy`, then `link`. It skips `login`, since the free OpenCode Zen models need no sign-in. Run it again to update the runner to a newer release. `NAUTILUS_VERSION` pins a release, `NAUTILUS_STUDIO_NAME` names the Studio, and `NAUTILUS_HOME` moves the checkout. It needs bash 4 or newer; on macOS, `brew install bash` and pipe it into that bash.
+
+### Option B: everything on one machine
 
 The fastest way to see it work. This starts the server, the PWA and the Tauri app together, and the first run writes a `.env.local` for you.
 
@@ -172,7 +191,7 @@ pnpm dev:web        # the PWA only
 pnpm --filter @nautilus/desktop tauri:dev   # the real Tauri shell
 ```
 
-### Option B: the runner on a Lightning AI Studio
+### Option C: the runner on a Lightning AI Studio
 
 This is the intended deployment. `scripts/deploy-lightning.sh` does all of it from the PC: it starts the Studio, exposes the two ports, uploads the working tree, installs the boot hook, builds and starts the runner, and waits for the public URL.
 
@@ -290,7 +309,7 @@ Everything has a working default. The settings worth knowing:
 ## Development
 
 ```bash
-pnpm test        # 243 tests
+pnpm test        # tests
 pnpm lint        # eslint, one flat config for the whole workspace
 pnpm typecheck
 pnpm format      # oxfmt
@@ -321,6 +340,10 @@ git tag v0.2.0 && git push origin v0.2.0
 ```
 
 The workflow refuses a tag that does not match the version. Linux ships a `.deb` and an AppImage but no `.rpm`: the app carries a whole Node runtime, and Tauri's RPM packer compresses it slowly enough to stall a build.
+
+## Status
+
+Nautilus is maintained on demand. Reported bugs get fixed, so [open an issue](https://github.com/itamarhanan/nautilus/issues) if something breaks. New features are not planned as of October 2026.
 
 ## License
 
