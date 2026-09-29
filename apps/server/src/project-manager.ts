@@ -143,6 +143,9 @@ async function waitForDevServer(
 
 export class ProjectManager {
   private readonly active = new Map<string, ActiveProject>();
+  // Leftovers still being stopped after a dev server exited. Shutting down
+  // waits for them, so none of them writes to the registry after it closes.
+  private readonly cleanups = new Set<Promise<void>>();
   private lifecycleQueue: Promise<void> = Promise.resolve();
 
   constructor(
@@ -278,9 +281,12 @@ export class ProjectManager {
         // A task runner can exit and leave the server it started holding the
         // port, so the rest of the session goes with it.
         if (session !== undefined) {
-          void stopSession(session).then(() => {
-            if (this.registry.devSession(id) === session) this.registry.setDevSession(id, null);
-          });
+          const cleanup = stopSession(session)
+            .then(() => {
+              if (this.registry.devSession(id) === session) this.registry.setDevSession(id, null);
+            })
+            .finally(() => this.cleanups.delete(cleanup));
+          this.cleanups.add(cleanup);
         }
         if (this.active.get(id)?.child !== child) {
           return;
@@ -415,6 +421,7 @@ export class ProjectManager {
         await this.stopInternal(id);
       }
     });
+    await Promise.all(this.cleanups);
   }
 
   private async serialized<T>(action: () => Promise<T>): Promise<T> {
