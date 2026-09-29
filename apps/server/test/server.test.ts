@@ -827,6 +827,93 @@ test("the dev command is told its port through PORT", async () => {
   }
 });
 
+async function startsWhereItListens(
+  script: string,
+  devPort = 3219,
+): Promise<{ status: number; target: string | null }> {
+  const root = await mkdtemp(join(tmpdir(), "nautilus-moved-"));
+  await writeFile(join(root, "server.js"), script);
+  const app = await createNautilusApp({
+    registryPath: ":memory:",
+    authSecret: testSecret,
+    projects: [project({ remotePath: root, devCommand: "node server.js", devPort })],
+    logger: new Logger(() => undefined),
+    devReadyTimeoutMs: 5000,
+  });
+  const ports = await listen(app);
+  try {
+    const started = await request(ports, "POST", "/api/projects/demo/start", { control: true });
+    return { status: started.status, target: app.registry.activeDevTarget("demo") };
+  } finally {
+    await app.close();
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+async function holdPort(): Promise<{ port: number; release: () => Promise<void> }> {
+  const { createServer } = await import("node:net");
+  const holder = createServer();
+  await new Promise<void>((resolve) => holder.listen(0, "127.0.0.1", resolve));
+  const address = holder.address();
+  if (!address || typeof address === "string") throw new Error("No port");
+  return {
+    port: address.port,
+    release: () =>
+      new Promise((resolve) => {
+        holder.close(() => {
+          resolve();
+        });
+      }),
+  };
+}
+
+test("a dev command that asks for one of the runner's ports is moved off it", async () => {
+  const previous = process.env.NAUTILUS_OPENCODE_PORT;
+  const runnerPort = await holdPort();
+  await runnerPort.release();
+  process.env.NAUTILUS_OPENCODE_PORT = String(runnerPort.port);
+  try {
+    const { status, target } = await startsWhereItListens(
+      `require("node:http").createServer((_, res) => res.end("ok")).listen(${String(runnerPort.port)}, "127.0.0.1");\n`,
+    );
+    expect(status).toBe(200);
+    expect(target).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+    expect(target).not.toBe(`http://127.0.0.1:${String(runnerPort.port)}`);
+  } finally {
+    if (previous === undefined) delete process.env.NAUTILUS_OPENCODE_PORT;
+    else process.env.NAUTILUS_OPENCODE_PORT = previous;
+  }
+});
+
+test("a dev command that asks for a port something else holds is moved to a free one", async () => {
+  const taken = await holdPort();
+  try {
+    const { status, target } = await startsWhereItListens(
+      `const server = require("node:http").createServer((_, res) => res.end("ok"));
+server.on("error", () => process.exit(7));
+server.listen({ port: ${String(taken.port)}, host: "127.0.0.1" });\n`,
+    );
+    expect(status).toBe(200);
+    expect(target).not.toBe(`http://127.0.0.1:${String(taken.port)}`);
+  } finally {
+    await taken.release();
+  }
+});
+
+test("a project whose own port is taken starts on another one", async () => {
+  const taken = await holdPort();
+  try {
+    const { status, target } = await startsWhereItListens(
+      "require('http').createServer((_, response) => response.end('ok')).listen(Number(process.env.PORT), '127.0.0.1')\n",
+      taken.port,
+    );
+    expect(status).toBe(200);
+    expect(target).not.toBe(`http://127.0.0.1:${String(taken.port)}`);
+  } finally {
+    await taken.release();
+  }
+});
+
 test("a configured preview origin turns a preview token into a full link", async () => {
   const app = await createNautilusApp({
     registryPath: ":memory:",
