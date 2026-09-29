@@ -148,6 +148,14 @@ describe("bootstrap", () => {
     expect(store.getState().auth).toBe("unauthenticated");
   });
 
+  test("a 401 from something other than the runner keeps the device signed in", async () => {
+    stubApi({ "GET /api/bootstrap": () => json(401, {}) });
+    const store = createWorkspaceStore();
+    await store.getState().actions.bootstrap();
+    expect(store.getState().auth).not.toBe("unauthenticated");
+    expect(store.getState().runner.isReachable).toBe(false);
+  });
+
   test("a 401 keeps the pairing code a link opened the app with", async () => {
     stubApi({
       "GET /api/bootstrap": () => json(401, { error: "unauthorized" }),
