@@ -13,7 +13,7 @@ GATEWAY_PORT="${NAUTILUS_GATEWAY_PORT:-8080}"
 # The preview listener serves the running project at the root of its own public
 # origin, so previewed apps need no base path.
 PREVIEW_PORT="${NAUTILUS_PREVIEW_PORT:-8081}"
-WEB_PORT="${NAUTILUS_WEB_PORT:-3000}"
+WEB_PORT="${NAUTILUS_WEB_PORT:-4002}"
 # Loopback-only admin API. The desktop reaches it through an SSH local forward;
 # the gateway never routes to it.
 CONTROL_PORT="${NAUTILUS_CONTROL_PORT:-4001}"
@@ -151,7 +151,7 @@ NAUTILUS_SERVER_PORT="${SERVER_PORT}" \
 printf '\n[%s] starting services\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"${LOG_DIR}/server.log"
 printf '\n[%s] starting services\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"${LOG_DIR}/web.log"
 HOST="${SERVER_HOST}" \
-PORT="${SERVER_PORT}" \
+NAUTILUS_SERVER_PORT="${SERVER_PORT}" \
 NAUTILUS_GATEWAY_HOST="${SERVER_HOST}" \
 NAUTILUS_GATEWAY_PORT="${GATEWAY_PORT}" \
 NAUTILUS_PREVIEW_PORT="${PREVIEW_PORT}" \

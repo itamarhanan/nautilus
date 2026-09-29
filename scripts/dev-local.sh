@@ -34,7 +34,7 @@ export NAUTILUS_PROJECTS_ROOT="${NAUTILUS_PROJECTS_ROOT:-${HOME}/nautilus/dev-pr
 export NAUTILUS_SECRETS_PATH="${NAUTILUS_SECRETS_PATH:-${HOME}/nautilus/dev-secrets}"
 export VITE_NAUTILUS_LOCAL_MODE=1
 # The QR code links the phone straight at the PWA in local mode.
-export VITE_NAUTILUS_WEB_PORT="${NAUTILUS_WEB_PORT:-3000}"
+export VITE_NAUTILUS_WEB_PORT="${NAUTILUS_WEB_PORT:-4002}"
 # The phone reaches the PWA over the LAN, so the preview listener has to be
 # there too. The runner links the phone to it on the host it used for the PWA,
 # and a preview token still gates every request.
