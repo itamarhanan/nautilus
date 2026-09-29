@@ -1,10 +1,12 @@
 export const brand = {
   name: "Nautilus",
-  tagline: "Run coding agents from your phone.",
+  tagline: "Run a coding agent from your phone. Bring the work home to your PC.",
   description:
-    "A private remote workspace for coding agents. Your projects stay on your PC, a cloud runner does the work, and your phone steers it.",
-  publisher: "Nautilus",
-  copyright: "© 2026 Nautilus",
+    "Prompt a coding agent from your phone and watch it work, with a live preview, while your laptop stays closed. Back at your desk, the desktop app shows a real diff and merges the work into your project.",
+  publisher: "Itamar Hanan",
+  copyright: "© 2026 Itamar Hanan",
+  homepage: "https://github.com/itamarhanan/nautilus",
+  license: "GPL-3.0-only",
   colors: {
     night: "#111418",
 
