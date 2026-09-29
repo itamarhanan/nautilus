@@ -1,0 +1,43 @@
+name: Bug report
+description: Something in Nautilus does not work the way the README says it should.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what you saw instead.
+    validations:
+      required: true
+  - type: dropdown
+    id: part
+    attributes:
+      label: Where
+      options:
+        - Installer or deploy script
+        - Runner on the Studio
+        - Phone app
+        - Desktop app
+        - Sync between the runner and the PC
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The release tag, or the revision `deploy-lightning.sh status` shows.
+      placeholder: v0.1.2
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: The PC's OS, and the phone and browser if it happened on the phone.
+      placeholder: Ubuntu 26.04, iPhone 15 with Safari
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: The failing output, or the end of `deploy-lightning.sh logs server`. Remove URLs and pairing codes first.
+      render: text
