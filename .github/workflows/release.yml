@@ -1,8 +1,9 @@
 name: Release
 
 # Push a tag named after the desktop version (v0.1.0 for version 0.1.0) to
-# build the installers and attach them to a draft release. Publish the draft
-# from the Releases page once the files are checked.
+# build the installers and attach them to a draft release with notes drafted
+# from the commits. Write the summary line at the top of the notes, check the
+# files and publish the draft from the Releases page.
 on:
   push:
     tags: ["v*"]
@@ -12,7 +13,29 @@ permissions:
   contents: write
 
 jobs:
+  # The notes are drafted once, from the commits since the previous tag, and
+  # every platform's job hands the same text to the draft release.
+  notes:
+    runs-on: ubuntu-latest
+    outputs:
+      body: ${{ steps.draft.outputs.body }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Draft the release notes
+        id: draft
+        shell: bash
+        run: |
+          {
+            echo "body<<NAUTILUS_NOTES"
+            scripts/release-notes.sh "${GITHUB_REF_NAME}" ||
+              echo "Notes are drafted only when a version tag starts the build."
+            echo "NAUTILUS_NOTES"
+          } >>"${GITHUB_OUTPUT}"
+
   desktop:
+    needs: notes
     strategy:
       fail-fast: false
       # Each platform builds on its own runner. The sync agent inside the app is
@@ -59,6 +82,6 @@ jobs:
           tauriScript: pnpm tauri
           tagName: v__VERSION__
           releaseName: Nautilus v__VERSION__
-          releaseBody: See the installation notes in the README.
+          releaseBody: ${{ needs.notes.outputs.body }}
           releaseDraft: true
           prerelease: false
