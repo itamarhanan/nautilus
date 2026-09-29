@@ -601,7 +601,7 @@ print_summary() {
   if provider_signed_in; then
     printf '  %s✓%s A model provider is signed in.\n' "${green}" "${reset}"
   else
-    printf '  %s•%s Sign in a model provider, once:  %s%s login%s\n' "${yellow}" "${reset}" "${cyan}" "${self}" "${reset}"
+    printf '  %s•%s The free OpenCode Zen models need no sign-in. For another provider:  %s%s login%s\n' "${yellow}" "${reset}" "${cyan}" "${self}" "${reset}"
   fi
   printf '  • Link a phone: %s%s link%s shows a QR code to scan with the phone camera.\n' "${cyan}" "${self}" "${reset}"
   printf '  • In the desktop app, open Settings › Runner, paste the public URL,\n'
