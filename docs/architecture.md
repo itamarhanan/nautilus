@@ -16,7 +16,7 @@ Lightning public HTTPS port
           v
   gateway 127.0.0.1:8080 ----- /api/*      -> API        127.0.0.1:4000
           |                    /preview/*  -> dev server 127.0.0.1:3100-3199
-          |                    everything else -> PWA    127.0.0.1:3000
+          |                    everything else -> PWA    127.0.0.1:4002
           |
   preview listener (optional, NAUTILUS_PREVIEW_PORT): the active project at /
 

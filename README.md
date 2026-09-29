@@ -12,7 +12,7 @@ The whole thing runs on infrastructure that costs nothing. There is no credit ca
 ```
    phone (PWA)                        free cloud runner                     your PC
   ┌────────────┐                ┌───────────────────────────┐          ┌──────────────┐
-  │  chat      │  HTTPS :8080   │  gateway ─┬─ PWA   :3000  │          │  Tauri app   │
+  │  chat      │  HTTPS :8080   │  gateway ─┬─ PWA   :4002  │          │  Tauri app   │
   │  preview   │◄──────────────►│           ├─ API   :4000  │          │      ▲       │
   │  history   │   (one origin) │           ├─ ctrl  :4001 ◄┼──────────┤  local fwd   │
   └────────────┘                │           └─ prev  :8081  │  SSH     │      │       │
@@ -113,11 +113,13 @@ The gateway is the only thing that should ever be public.
 |      8081 | gateway     | Preview origin, so a previewed app needs no base path                                                  |
 |      4000 | server      | The API (loopback)                                                                                     |
 |      4001 | server      | The control API (loopback only, never routed by the gateway)                                           |
-|      3000 | web         | The PWA (loopback)                                                                                     |
+|      4002 | web         | The PWA (loopback)                                                                                     |
 |      4096 | OpenCode    | The agent, with its own data directory (loopback)                                                      |
 | 3100-3199 | per project | The project's own dev server                                                                           |
 |      4100 | sync agent  | The PC's loopback agent, started by the desktop app                                                    |
 |      4200 | (forward)   | The port on the runner that the reverse forward connects to the PC's agent                             |
+
+A project's dev server never takes one of these ports and never fails on a taken one. Each Node process of it loads `apps/server/dev-port-shim.mjs`, which moves a listen on a runner port, or on one something else holds, to a free port. That covers `next dev -p 4096` and a copy of nautilus hosted by nautilus. The runner previews the dev server wherever it ends up listening. A dev server outside Node that hits a taken port still stops, with `dev_port_in_use:<port>`.
 
 ## Install the desktop app
 
@@ -159,7 +161,7 @@ The fastest way to see it work. This starts the server, the PWA and the Tauri ap
 pnpm dev:local
 ```
 
-Local mode skips SSH and tunnels, turns off secure cookies and reaches the sync agent directly on `127.0.0.1:4100`. The phone link in the desktop app points at `http://127.0.0.1:3000`. To use a real phone on the same network, open it through the LAN preview listener.
+Local mode skips SSH and tunnels, turns off secure cookies and reaches the sync agent directly on `127.0.0.1:4100`. The phone link in the desktop app points at `http://127.0.0.1:4002`. To use a real phone on the same network, open it through the LAN preview listener.
 
 To run the pieces yourself:
 
@@ -203,7 +205,7 @@ lightning studio start  --name "$NAUTILUS_STUDIO_NAME" \
   --teamspace "$NAUTILUS_TEAMSPACE" --machine CPU
 ```
 
-Expose **8080 and 8081 only**. Never expose 4000, 4001, 3000, 4096 or a project's dev port. A new port can return Lightning's 404 for about a minute.
+Expose **8080 and 8081 only**. Never expose 4000, 4001, 4002, 4096 or a project's dev port. A new port can return Lightning's 404 for about a minute.
 
 **2. Put the repo in the Studio's persistent home** and configure it:
 
