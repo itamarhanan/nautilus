@@ -159,7 +159,7 @@ export function loadServerOptions(env: NodeJS.ProcessEnv = process.env): ServerO
     gatewayHost,
     gatewayPort: Number(env.NAUTILUS_GATEWAY_PORT ?? 8080),
     previewHost: env.NAUTILUS_PREVIEW_HOST ?? gatewayHost,
-    webPort: Number(env.NAUTILUS_WEB_PORT ?? 3000),
+    webPort: Number(env.NAUTILUS_WEB_PORT ?? 4002),
     sseHeartbeatMs: Number(env.NAUTILUS_SSE_HEARTBEAT_MS ?? 25_000),
     controlOrigins: (env.NAUTILUS_CONTROL_ORIGINS ?? "")
       .split(",")
