@@ -5,7 +5,7 @@ import { plural } from "../lib/format";
 import type { StoreRuntime } from "./runtime";
 import { type DesktopActions, emptyStatus } from "./types";
 
-const localModeWebPort = String(import.meta.env.VITE_NAUTILUS_WEB_PORT ?? "3000");
+const localModeWebPort = String(import.meta.env.VITE_NAUTILUS_WEB_PORT ?? "4002");
 
 function reportExclusions({ get, set }: StoreRuntime, projectId: string, excluded: string[]): void {
   if (excluded.length === 0) return;

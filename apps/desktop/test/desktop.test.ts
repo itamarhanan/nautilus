@@ -1434,7 +1434,7 @@ describe("desktop store", () => {
     await vi.waitFor(() => {
       expect(store.getState().pairing?.code).toBe("ABCD2345");
     });
-    expect(store.getState().pairing?.url).toBe("http://127.0.0.1:3000/?pair=ABCD2345");
+    expect(store.getState().pairing?.url).toBe("http://127.0.0.1:4002/?pair=ABCD2345");
   });
 
   it("restarts the agent for a new runner and closes the open review", async () => {
