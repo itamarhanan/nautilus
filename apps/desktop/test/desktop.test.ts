@@ -1600,7 +1600,7 @@ describe("bundle metadata", () => {
       longDescription: brand.description,
     });
     const page = readFileSync(fileURLToPath(new URL("../index.html", import.meta.url)), "utf8");
-    expect(page).toContain(`<meta name="description" content="${brand.tagline}" />`);
+    expect(page.match(/<meta\s+name="description"\s+content="([^"]*)"/)?.[1]).toBe(brand.tagline);
   });
 });
 
