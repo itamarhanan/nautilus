@@ -581,7 +581,14 @@ boot_runner() {
     show_log_tail "${log_start}"
     fail "the runner did not answer on its public URL within ${ready_timeout} seconds"
   fi
-  curl --fail --silent --max-time 10 "${gateway_url}/" >/dev/null || fail 'the runner is up, but the PWA did not answer'
+  # The runner can report ready a little before the PWA answers through the
+  # proxy, so the PWA gets a minute of its own.
+  local attempt
+  for ((attempt = 1; attempt <= 12; attempt += 1)); do
+    curl --fail --silent --max-time 10 "${gateway_url}/" >/dev/null && break
+    ((attempt < 12)) || fail 'the runner is up, but the PWA did not answer'
+    sleep 5
+  done
   ok "The runner and the PWA are ready."
 }
 
