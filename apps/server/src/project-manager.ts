@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { readFile, readlink, realpath, stat } from "node:fs/promises";
-import { createConnection } from "node:net";
+import { createConnection, createServer, type AddressInfo } from "node:net";
 import { join, sep } from "node:path";
 import type { Readable } from "node:stream";
 import type { ProjectConfig, ProjectRecord } from "@nautilus/types";
@@ -16,6 +16,9 @@ type ActiveProject = {
 
 const OUTPUT_TAIL_BYTES = 4096;
 const INSTALL_TIMEOUT_MS = 5 * 60 * 1000;
+// Resolved against the package root, from src/ as from the dist/ bundle, the
+// same way app.ts finds package.json.
+const devPortShim = new URL("../dev-port-shim.mjs", import.meta.url);
 
 function captureOutputTail(...streams: (Readable | null)[]): () => string {
   let tail = "";
@@ -110,6 +113,27 @@ function checkPort(port: number): Promise<boolean> {
   });
 }
 
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address() as AddressInfo;
+      server.close(() => {
+        resolve(port);
+      });
+    });
+  });
+}
+
+// Every Node process of the dev server loads the shim, so none of them takes
+// one of the runner's ports or exits because a port it asked for is taken.
+function devNodeOptions(inherited: string | undefined, reserved: readonly number[]): string {
+  const shim = new URL(devPortShim);
+  shim.searchParams.set("reserved", reserved.join(","));
+  return [inherited, `--import=${shim.href}`].filter(Boolean).join(" ");
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -154,6 +178,8 @@ export class ProjectManager {
     private readonly logger: Logger,
     private readonly readyTimeoutMs: number,
     private readonly projectHasCode?: (projectId: string) => Promise<boolean>,
+    // The ports of the runner's own services, which no dev server may take.
+    private readonly reservedPorts: readonly number[] = [],
   ) {}
 
   activeProject(): ProjectRecord | undefined {
@@ -254,9 +280,12 @@ export class ProjectManager {
       if (!directory.isDirectory()) {
         throw new Error("remote_path_not_directory");
       }
-      if (await checkPort(configured.devPort)) {
-        throw new Error("dev_port_in_use");
-      }
+      // Something else holding the project's port moves the dev server rather
+      // than stopping it.
+      const port =
+        this.reservedPorts.includes(configured.devPort) || (await checkPort(configured.devPort))
+          ? await freePort()
+          : configured.devPort;
 
       await this.installDependencies(id, configured.remotePath);
 
@@ -267,7 +296,8 @@ export class ProjectManager {
         env: {
           ...process.env,
 
-          PORT: String(configured.devPort),
+          PORT: String(port),
+          NODE_OPTIONS: devNodeOptions(process.env.NODE_OPTIONS, this.reservedPorts),
           NAUTILUS_PROJECT_ID: id,
         },
         stdio: ["ignore", "pipe", "pipe"],
@@ -316,13 +346,13 @@ export class ProjectManager {
         }
       });
 
-      const target = await waitForDevServer(child, configured.devPort, this.readyTimeoutMs);
+      const target = await waitForDevServer(child, port, this.readyTimeoutMs);
       const startedAt = new Date().toISOString();
       this.registry.setActiveDevTarget(id, target);
       this.registry.updateProjectState(id, "running", null, startedAt);
       this.logger.info("project_started", {
         projectId: id,
-        devPort: configured.devPort,
+        devPort: port,
         target,
       });
       return this.registry.getProject(id) as ProjectRecord;

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ProjectConfig } from "@nautilus/types";
 import { Auth } from "./auth";
-import { ConfigurationError, loadProjects, loadServerOptions } from "./config";
+import { ConfigurationError, loadProjects, loadServerOptions, type ServerOptions } from "./config";
 import { HttpError, toHttpError } from "./errors";
 import { controlGuard } from "./http/control";
 import { sendError } from "./http/respond";
@@ -77,6 +77,19 @@ const serverVersion = (() => {
     return "unknown";
   }
 })();
+
+function runnerPorts(serverOptions: ServerOptions, previewPort: number | undefined): number[] {
+  const syncAgentPort = Number(new URL(serverOptions.syncAgentUrl).port);
+  return [
+    serverOptions.port,
+    serverOptions.controlPort,
+    serverOptions.gatewayPort,
+    serverOptions.webPort,
+    serverOptions.openCodePort,
+    ...(previewPort === undefined ? [] : [previewPort]),
+    ...(syncAgentPort > 0 ? [syncAgentPort] : []),
+  ];
+}
 
 async function checkProjects(
   sync: SyncCoordinator,
@@ -160,6 +173,7 @@ export async function createNautilusApp(options: AppOptions = {}): Promise<Nauti
     logger,
     options.devReadyTimeoutMs ?? serverOptions.devReadyTimeoutMs,
     sync ? (projectId) => sync.hasCode(projectId) : undefined,
+    runnerPorts(serverOptions, options.previewPort ?? serverOptions.previewPort),
   );
   if (sync) {
     sync.connect({
