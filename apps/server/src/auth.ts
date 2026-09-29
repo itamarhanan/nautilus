@@ -4,6 +4,12 @@ import { HttpError } from "./errors";
 import { RateLimiter, requestRateKey } from "./rate-limiter";
 import type { Registry } from "./registry";
 
+// A session lasts until its device is revoked or the phone signs out, never
+// for a set time. Browsers keep a cookie for at most 400 days, so a phone that
+// connects gets a fresh cookie once a day and its copy never runs out.
+const SESSION_SECONDS = 400 * 24 * 60 * 60;
+const RENEW_AFTER_SECONDS = 24 * 60 * 60;
+
 export type Principal = { kind: "admin" } | { kind: "device"; deviceId: string };
 
 type SessionClaims = {
@@ -42,17 +48,13 @@ export class Auth {
     private readonly registry: Registry,
     private readonly authSecret: string,
     private readonly secureCookies = true,
-    private readonly sessionSeconds = 28_800,
   ) {
     if (authSecret.length < 32) {
       throw new Error("Auth secret must be at least 32 characters");
     }
-    if (!Number.isInteger(sessionSeconds) || sessionSeconds < 60 || sessionSeconds > 604_800) {
-      throw new Error("Auth session duration must be between 60 and 604800 seconds");
-    }
   }
 
-  authenticate(request: IncomingMessage): Principal {
+  authenticate(request: IncomingMessage, response?: ServerResponse): Principal {
     const rateKey = requestRateKey(request);
     if (this.failedAuth.isLimited(rateKey)) {
       throw new HttpError(429, "rate_limited", "Too many authentication attempts");
@@ -65,6 +67,9 @@ export class Auth {
         const device = this.registry.findDeviceById(claims.deviceId);
         if (device && !device.revokedAt) {
           this.registry.touchDevice(device.id);
+          if (response && claims.iat <= Math.floor(Date.now() / 1000) - RENEW_AFTER_SECONDS) {
+            this.issueSessionCookie(device.id, response);
+          }
           return { kind: "device", deviceId: device.id };
         }
       }
@@ -86,14 +91,14 @@ export class Auth {
       sub: device.id,
       jti: randomUUID(),
       iat: now,
-      exp: now + this.sessionSeconds,
+      exp: now + SESSION_SECONDS,
       deviceId: device.id,
     };
     const header = encode(JSON.stringify({ alg: "HS256", typ: "JWT" }));
     const payload = encode(JSON.stringify(claims));
     const content = `${header}.${payload}`;
     const signature = createHmac("sha256", this.authSecret).update(content).digest("base64url");
-    response.setHeader("Set-Cookie", this.cookie(`${content}.${signature}`, this.sessionSeconds));
+    response.setHeader("Set-Cookie", this.cookie(`${content}.${signature}`, SESSION_SECONDS));
   }
 
   clearSessionCookie(response: ServerResponse): void {
@@ -142,7 +147,7 @@ export class Auth {
         claims.sub !== claims.deviceId ||
         claims.iat > Math.floor(Date.now() / 1000) + 60 ||
         claims.exp <= Math.floor(Date.now() / 1000) ||
-        claims.exp - claims.iat > this.sessionSeconds
+        claims.exp - claims.iat > SESSION_SECONDS
       ) {
         return undefined;
       }

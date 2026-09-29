@@ -37,7 +37,6 @@ export type AppOptions = {
   projectsRoot?: string;
   devPortRange?: [number, number];
   secureCookies?: boolean;
-  authSessionSeconds?: number;
   previewSecret?: string;
   previewSessionSeconds?: number;
   previewOrigin?: string | undefined;
@@ -140,12 +139,7 @@ export async function createNautilusApp(options: AppOptions = {}): Promise<Nauti
       projectMap.set(id, { id, name, remotePath, devCommand, devPort, previewPath });
     }
   }
-  const auth = new Auth(
-    registry,
-    authSecret,
-    options.secureCookies ?? serverOptions.secureCookies,
-    options.authSessionSeconds ?? serverOptions.authSessionSeconds,
-  );
+  const auth = new Auth(registry, authSecret, options.secureCookies ?? serverOptions.secureCookies);
   const previewTokens = new PreviewTokens(
     options.previewSecret ?? serverOptions.previewSecret ?? authSecret,
     (tokenIdHash, projectId, expiresAt) => {

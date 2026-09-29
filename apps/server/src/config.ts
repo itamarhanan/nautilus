@@ -128,7 +128,6 @@ export type ServerOptions = {
   projectsRoot: string;
   devPortRange: [number, number];
   secureCookies: boolean;
-  authSessionSeconds: number;
   devReadyTimeoutMs: number;
   previewSecret: string | undefined;
   previewSessionSeconds: number | undefined;
@@ -171,7 +170,6 @@ export function loadServerOptions(env: NodeJS.ProcessEnv = process.env): ServerO
     projectsRoot: env.NAUTILUS_PROJECTS_ROOT ?? `${env.HOME ?? "/tmp"}/nautilus/projects`,
     devPortRange: parsePortRange(env.NAUTILUS_DEV_PORT_RANGE ?? "3100-3199"),
     secureCookies: env.NAUTILUS_SECURE_COOKIES !== "false",
-    authSessionSeconds: Number(env.NAUTILUS_AUTH_SESSION_SECONDS ?? 28_800),
     devReadyTimeoutMs: Number(env.NAUTILUS_DEV_READY_TIMEOUT_MS ?? 30_000),
     previewSecret: env.NAUTILUS_PREVIEW_SECRET,
     previewSessionSeconds: env.NAUTILUS_PREVIEW_SESSION_SECONDS

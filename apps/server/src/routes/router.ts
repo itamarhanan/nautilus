@@ -64,7 +64,7 @@ export function createRouter(
         ? { kind: "admin" }
         : access === "public" && found
           ? null
-          : auth.authenticate(request);
+          : auth.authenticate(request, response);
     if (!found) throw new HttpError(404, "not_found", "Route not found");
     if (access === "admin" && principal?.kind !== "admin") {
       throw new HttpError(404, "not_found", "Route not found");
