@@ -468,10 +468,14 @@ chmod 700 "${HOME}/nautilus" "${run_dir}" "${log_dir}" "${secret_dir}"
 
 # Every check runs before anything moves, so a refusal leaves the Studio as it
 # was.
+# A new Studio comes with a starter hook that holds only comments. It runs
+# nothing, so it is backed up and replaced like one this script wrote.
 foreign_hook=false
 if [[ -e "${hook}" ]] && ! grep -qF "${hook_marker}" "${hook}"; then
-  [[ "${replace_hook}" == true ]] ||
-    fail "${hook} exists and was not written by this script. Move it away, or rerun with --replace-hook to back it up and replace it."
+  if grep -qvE '^[[:space:]]*(#|$)' "${hook}"; then
+    [[ "${replace_hook}" == true ]] ||
+      fail "${hook} exists and was not written by this script. Move it away, or rerun with --replace-hook to back it up and replace it."
+  fi
   foreign_hook=true
 fi
 
