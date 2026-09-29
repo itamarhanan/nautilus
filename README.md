@@ -72,7 +72,7 @@ A free Lightning Studio restarts on a timer. Nautilus treats that as a full recy
 The agent's work needs history, checkpoints, three-way merges and undo. Your own branches, hooks and remotes must stay out of it. So each side keeps a **shadow repository**, a bare Git directory whose worktree is the real project folder. Your `.git` is never read or written.
 
 - **Sync is incremental.** A `git bundle` carries only the commits after the last shared base. It is checked by SHA-256 and for ancestry before it is imported.
-- **Merges are preflighted.** `git merge-tree` merges both sides before anything is written. A conflict applies nothing, not even partly. You pick a side per file and apply again.
+- **Merges are preflighted.** Both sides are merged in a throwaway index, with `git read-tree -m` and `git merge-file` for files both sides edited, before anything is written. A conflict applies nothing, not even partly. You pick a side per file and apply again.
 - **Applies are transactional.** A transaction record and a recovery bundle are written before the first file changes. An interrupted apply is rolled back on the next start and never reported as synced.
 - **What Git cannot round-trip is refused.** Symlinks, submodules, `.gitmodules`, Git LFS pointers and oversized files fail with a clear error. Dependencies, caches and `.env` files stay out. A nested checkout stays out too, and the desktop tells you once.
 - **Every agent turn is a checkpoint.** The phone lists the files each turn changed and can undo one turn while keeping the ones after it, the way `git revert` does. An undo is a checkpoint too, so it can be undone.
