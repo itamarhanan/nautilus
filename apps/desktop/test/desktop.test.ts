@@ -1594,9 +1594,13 @@ describe("bundle metadata", () => {
     expect(config.bundle).toMatchObject({
       publisher: brand.publisher,
       copyright: brand.copyright,
+      homepage: brand.homepage,
+      license: brand.license,
       shortDescription: brand.tagline,
       longDescription: brand.description,
     });
+    const page = readFileSync(fileURLToPath(new URL("../index.html", import.meta.url)), "utf8");
+    expect(page).toContain(`<meta name="description" content="${brand.tagline}" />`);
   });
 });
 
