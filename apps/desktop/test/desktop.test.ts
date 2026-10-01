@@ -36,6 +36,12 @@ import {
   withProject,
 } from "../src/lib/state";
 import { editablePath } from "../src/lib/editor";
+import {
+  changedVariables,
+  environmentDigests,
+  environmentError,
+  foundVariables,
+} from "../src/lib/environment";
 import { SyncSession } from "../src/lib/sync";
 import { createDesktopStore, type DesktopServices } from "../src/store";
 
@@ -781,6 +787,58 @@ describe("sync session", () => {
   });
 });
 
+describe("preview variable helpers", () => {
+  it("offers each key with a value, from the file the dev server reads it from", () => {
+    const found = foundVariables(
+      [
+        {
+          path: ".env",
+          keys: [
+            { name: "API_URL", value: "base" },
+            { name: "ONLY_BASE", value: "b" },
+          ],
+        },
+        { path: ".env.local", keys: [{ name: "API_URL", value: "local" }] },
+        { path: ".env.development.local", keys: [{ name: "API_URL", value: "dev-local" }] },
+        { path: ".env.production", keys: [{ name: "STRIPE_KEY", value: "sk_live" }] },
+        {
+          path: ".env.example",
+          keys: [
+            { name: "STRIPE_KEY", value: null },
+            { name: "NEW", value: null },
+          ],
+        },
+        { path: "apps/web/.env", keys: [{ name: "ONLY_BASE", value: "nested" }] },
+        { path: ".env", keys: [{ name: "TAKEN", value: "x" }] },
+      ],
+      new Set(["TAKEN"]),
+    );
+    expect(found).toEqual([
+      { key: "API_URL", value: "dev-local", path: ".env.development.local", importable: true },
+      { key: "ONLY_BASE", value: "b", path: ".env", importable: true },
+      // Offered, but unticked: the dev command never reads production values.
+      { key: "STRIPE_KEY", value: "sk_live", path: ".env.production", importable: false },
+    ]);
+  });
+
+  it("validates names, null characters and the size limit", () => {
+    expect(environmentError({ GOOD_1: "x", _ALSO: "" })).toBeNull();
+    expect(environmentError({ "BAD-NAME": "x" })).toMatch(/not a valid variable name/);
+    expect(environmentError({ A: "x\0y" })).toMatch(/null character/);
+    expect(environmentError({ A: "x".repeat(70_000) })).toMatch(/64 KB/);
+  });
+
+  it("finds added, changed, removed and lost keys without comparing values remotely", async () => {
+    const sent = await environmentDigests({ SAME: "1", CHANGED: "old", LOST: "z" });
+    expect(
+      await changedVariables(
+        { variables: { SAME: "1", CHANGED: "new", ADDED: "a", LOST: "z" }, sent },
+        ["SAME", "CHANGED", "REMOVED"],
+      ),
+    ).toEqual(["ADDED", "CHANGED", "LOST", "REMOVED"]);
+  });
+});
+
 describe("desktop store", () => {
   function services(overrides: Partial<DesktopServices> = {}) {
     let savedState: unknown;
@@ -812,6 +870,40 @@ describe("desktop store", () => {
         code: "ABCD2345",
         expiresAt: new Date(Date.now() + 300_000).toISOString(),
       }),
+      environment: vi.fn().mockResolvedValue({ keys: [], updatedAt: null }),
+      updateEnvironment: vi
+        .fn()
+        .mockImplementation((_projectId: string, variables: Record<string, string>) =>
+          Promise.resolve({
+            keys: Object.keys(variables).sort(),
+            updatedAt: "2026-10-01T00:00:00Z",
+          }),
+        ),
+    };
+    const keychain = new Map<
+      string,
+      { variables: Record<string, string>; sent: Record<string, string> }
+    >();
+    const environment = {
+      load: vi.fn((projectId: string) =>
+        Promise.resolve({
+          variables: {},
+          sent: {},
+          ...keychain.get(projectId),
+          keychain: true,
+        }),
+      ),
+      save: vi.fn(
+        (projectId: string, variables: Record<string, string>, sent: Record<string, string>) => {
+          keychain.set(projectId, { variables, sent });
+          return Promise.resolve({ keychain: true });
+        },
+      ),
+      remove: vi.fn((projectId: string) => {
+        keychain.delete(projectId);
+        return Promise.resolve();
+      }),
+      scan: vi.fn().mockResolvedValue([]),
     };
     const channel = {
       current: {
@@ -880,6 +972,7 @@ describe("desktop store", () => {
         listDir: () => Promise.resolve([]),
         readText: () => Promise.resolve(""),
       },
+      environment,
       spawn: fakeSpawner().spawn,
       channel: channel as unknown as ControlChannel,
       agent: () => Promise.resolve(agent as unknown as AgentProcess),
@@ -894,6 +987,8 @@ describe("desktop store", () => {
       agent,
       agentClient,
       saveSettingsMock,
+      environment,
+      keychain,
       savedState: () => savedState,
     };
   }
@@ -945,6 +1040,87 @@ describe("desktop store", () => {
       acknowledgedExclusions: [],
     })),
   };
+
+  describe("preview variables", () => {
+    it("saves to the keychain, sends to the runner, and skips an unchanged save", async () => {
+      const { value, control, keychain } = services({
+        loadState: () => Promise.resolve(twoProjects),
+      });
+      const store = createDesktopStore(value);
+      await store.getState().init();
+
+      expect(await store.getState().saveEnvironment("shop", { API_URL: "https://x" })).toBeNull();
+      expect(control.updateEnvironment).toHaveBeenCalledWith("shop", { API_URL: "https://x" });
+      expect(keychain.get("shop")?.sent.API_URL).toMatch(/^[0-9a-f]{64}$/);
+      expect(store.getState().environments.shop?.keys).toEqual(["API_URL"]);
+
+      control.environment.mockResolvedValue({
+        keys: ["API_URL"],
+        updatedAt: "2026-10-01T00:00:00Z",
+      });
+      expect(await store.getState().saveEnvironment("shop", { API_URL: "https://x" })).toBeNull();
+      expect(control.updateEnvironment).toHaveBeenCalledTimes(1);
+    });
+
+    it("rejects invalid names before anything leaves the PC", async () => {
+      const { value, control, environment } = services({
+        loadState: () => Promise.resolve(twoProjects),
+      });
+      const store = createDesktopStore(value);
+      await store.getState().init();
+      expect(await store.getState().saveEnvironment("shop", { "1BAD": "x" })).toMatch(
+        /not a valid variable name/,
+      );
+      expect(environment.save).not.toHaveBeenCalled();
+      expect(control.updateEnvironment).not.toHaveBeenCalled();
+    });
+
+    it("lists changed names in a push review and sends them after the push", async () => {
+      const harness = services({ loadState: () => Promise.resolve(twoProjects) });
+      const { control, keychain } = harness;
+      keychain.set("shop", { variables: { TOKEN: "secret-value", NEW: "1234" }, sent: {} });
+      control.environment.mockResolvedValue({ keys: ["OLD", "TOKEN"], updatedAt: null });
+      control.projects.mockResolvedValue([{ id: "shop", name: "shop", state: "idle" }]);
+      const preview: SyncResponse = {
+        version: 1,
+        requestId: "preview-1",
+        status: "ok",
+        state: {
+          projectId: "shop",
+          head: "c".repeat(40),
+          baseHead: "b".repeat(40),
+          dirty: false,
+          changes: { files: [], additions: 0, deletions: 0 },
+        },
+        diff: { files: [], additions: 0, deletions: 0 },
+      };
+      control.syncPreview.mockResolvedValue(preview);
+      control.sync.mockResolvedValue({ version: 1, requestId: "push-1", status: "ok" });
+      const store = createDesktopStore(harness.value);
+      await store.getState().init();
+      await store.getState().refreshRunner();
+      await store.getState().startReview("push", "shop");
+      expect(store.getState().review?.environmentChanges).toEqual(["NEW", "OLD", "TOKEN"]);
+
+      await store.getState().applyReview();
+      expect(control.updateEnvironment).toHaveBeenCalledWith("shop", {
+        TOKEN: "secret-value",
+        NEW: "1234",
+      });
+      expect(Object.keys(keychain.get("shop")?.sent ?? {}).sort()).toEqual(["NEW", "TOKEN"]);
+    });
+
+    it("forgets a removed project's variables on this PC", async () => {
+      const { value, control, environment } = services({
+        loadState: () => Promise.resolve(twoProjects),
+      });
+      Object.assign(control, { deleteProject: vi.fn().mockResolvedValue(undefined) });
+      const store = createDesktopStore(value);
+      await store.getState().init();
+      await store.getState().removeProject("shop");
+      expect(environment.remove).toHaveBeenCalledWith("shop");
+    });
+  });
 
   it("undoes a pull on the runner before the PC, and refreshes afterwards", async () => {
     const { value, control, agentClient } = services({
@@ -1482,6 +1658,7 @@ describe("desktop store", () => {
         result: null,
         error: null,
         resolutions: {},
+        environmentChanges: [],
         background: false,
       },
     });
