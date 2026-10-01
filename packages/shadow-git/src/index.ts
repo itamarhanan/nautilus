@@ -60,7 +60,35 @@ const ignoredNames = new Set([
   ".gradle",
   ".terraform",
 ]);
-const ignoredFiles = /^\.env(?:\..*)?$|\.log$/;
+// Secret files stay on the machine they were written on. Preview values reach
+// the runner through its environment store instead, never through sync.
+const secretFiles = [
+  /^\.env(?:\..*)?$/,
+  /^\.envrc$/,
+  /^\.dev\.vars(?:\..*)?$/,
+  /\.(?:pem|key|p12|pfx)$/,
+  /^id_(?:rsa|dsa|ecdsa|ed25519)(?:\..*)?$/,
+];
+const secretPatterns = [
+  ".env",
+  ".env.*",
+  ".envrc",
+  ".dev.vars",
+  ".dev.vars.*",
+  "*.pem",
+  "*.key",
+  "*.p12",
+  "*.pfx",
+  "id_rsa*",
+  "id_dsa*",
+  "id_ecdsa*",
+  "id_ed25519*",
+];
+
+export function isSecretFile(path: string): boolean {
+  const name = path.split("/").at(-1) ?? "";
+  return secretFiles.some((pattern) => pattern.test(name));
+}
 
 const headRef = "refs/nautilus/head";
 const baselineRef = "refs/nautilus/baseline";
@@ -271,7 +299,8 @@ export class ShadowGit {
     await mkdir(join(this.gitDir, "info"), { recursive: true, mode: 0o700 });
     await writeFile(
       join(this.gitDir, "info", "exclude"),
-      [...ignoredNames].map((name) => `${name}/`).join("\n") + "\n.env\n.env.*\n*.log\n",
+      [...[...ignoredNames].map((name) => `${name}/`), ...secretPatterns, "*.log"].join("\n") +
+        "\n",
       { mode: 0o600 },
     );
     await this.ensureIndex();
@@ -345,14 +374,7 @@ export class ShadowGit {
       await this.git(["update-index", "--force-remove", "--", path]).catch(() => undefined);
     }
 
-    for (let start = 0; start < ignored.tracked.length; start += 500) {
-      await this.git([
-        "update-index",
-        "--force-remove",
-        "--",
-        ...ignored.tracked.slice(start, start + 500),
-      ]);
-    }
+    await this.removeFromIndex(ignored.tracked);
 
     await this.validateIndex();
     await this.git(["add", "--all", "--", "."]);
@@ -544,14 +566,17 @@ export class ShadowGit {
 
   async diff(baseHead: string | null, head: string): Promise<SyncDiff> {
     const base = baseHead ?? (await this.emptyTree());
+    // A secret file dropping out of history is not a deletion anyone made, and
+    // the file stays on disk, so the review never lists it.
     const changes = parseNameStatus(
       (await this.git(["diff", "--name-status", "-z", "--find-renames", base, head])).toString(
         "utf8",
       ),
-    );
+    ).filter((change) => !isSecretFile(change.path));
     const statistics = parseNumstat(
       (await this.git(["diff", "--numstat", "-z", "--find-renames", base, head])).toString("utf8"),
     );
+    for (const path of statistics.keys()) if (isSecretFile(path)) statistics.delete(path);
     let additions = 0;
     let deletions = 0;
     for (const statistic of statistics.values()) {
@@ -671,6 +696,7 @@ export class ShadowGit {
         ["read-tree", "-m", "--aggressive", baseHead, oursHead, theirsHead],
         indexEnvironment,
       );
+      await this.forgetSecrets(indexEnvironment);
       const conflicts: MergeConflict[] = [];
       for (const [path, stages] of await this.unmergedStages(indexEnvironment)) {
         const conflict = await this.resolvePath(
@@ -795,7 +821,7 @@ export class ShadowGit {
     const commit = (
       await this.git([
         "commit-tree",
-        tree,
+        await this.withoutSecrets(tree),
         ...uniqueParents.flatMap((parent) => ["-p", parent]),
         "-m",
         message.slice(0, maxMessageLength),
@@ -803,14 +829,58 @@ export class ShadowGit {
     )
       .toString("utf8")
       .trim();
-    await this.git(["read-tree", "-u", "--reset", tree]);
+    await this.forgetSecrets();
+    await this.git(["read-tree", "-u", "--reset", `${commit}^{tree}`]);
     await this.git(["update-ref", headRef, commit]);
     return commit;
   }
 
   async restoreHead(head: string): Promise<void> {
-    await this.git(["read-tree", "-u", "--reset", head]);
+    await this.forgetSecrets();
+    await this.git(["read-tree", "-u", "--reset", await this.withoutSecrets(head)]);
     await this.git(["update-ref", headRef, head]);
+  }
+
+  // History from before a file counted as secret can still carry it. Applying
+  // such a tree must neither write the file nor delete the copy on disk, so
+  // secret paths leave the tree, and the index forgets them before
+  // `read-tree -u` gets the chance to remove them from the work tree.
+  private async withoutSecrets(treeish: string): Promise<string> {
+    const tree = (await this.git(["rev-parse", `${treeish}^{tree}`])).toString("utf8").trim();
+    const secrets = (await this.git(["ls-tree", "-r", "-z", "--name-only", "--full-tree", tree]))
+      .toString("utf8")
+      .split("\0")
+      .filter((path) => path && isSecretFile(path));
+    if (secrets.length === 0) return tree;
+    const directory = await mkdtemp(join(tmpdir(), "nautilus-index-"));
+    const indexEnvironment = { GIT_INDEX_FILE: join(directory, "index") };
+    try {
+      await this.git(["read-tree", tree], indexEnvironment);
+      await this.removeFromIndex(secrets, indexEnvironment);
+      return (await this.git(["write-tree"], indexEnvironment)).toString("utf8").trim();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+
+  private async forgetSecrets(indexEnvironment: NodeJS.ProcessEnv = {}): Promise<void> {
+    const secrets = (await this.git(["ls-files", "-z"], indexEnvironment))
+      .toString("utf8")
+      .split("\0")
+      .filter((path) => path && isSecretFile(path));
+    await this.removeFromIndex([...new Set(secrets)], indexEnvironment);
+  }
+
+  private async removeFromIndex(
+    paths: readonly string[],
+    indexEnvironment: NodeJS.ProcessEnv = {},
+  ): Promise<void> {
+    for (let start = 0; start < paths.length; start += 500) {
+      await this.git(
+        ["update-index", "--force-remove", "--", ...paths.slice(start, start + 500)],
+        indexEnvironment,
+      );
+    }
   }
 
   private async emptyBlob(): Promise<string> {
@@ -914,7 +984,7 @@ export class ShadowGit {
         if (
           ignored.has(path) ||
           ignoredNames.has(entry.name) ||
-          (entry.isFile() && ignoredFiles.test(entry.name))
+          (entry.isFile() && (isSecretFile(entry.name) || entry.name.endsWith(".log")))
         )
           continue;
         if (entry.isSymbolicLink())
