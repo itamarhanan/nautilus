@@ -295,6 +295,17 @@ export type ProjectRecord = ProjectConfig & {
   updatedAt: string;
 };
 
+// The runner never returns values: a project's environment is write-only once
+// it leaves the PC, so reads only report which keys the preview receives.
+export type ProjectEnvironment = {
+  keys: string[];
+  updatedAt: string | null;
+};
+
+export type ProjectEnvironmentUpdate = {
+  variables: Record<string, string>;
+};
+
 export type PairingCodeResponse = {
   id: string;
   code: string;
