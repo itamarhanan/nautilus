@@ -30,6 +30,7 @@ async function main(): Promise<void> {
     port: options.openCodePort,
     dataDir: options.openCodeDataDir,
     startupTimeoutMs: options.openCodeStartupTimeoutMs,
+    hiddenPaths: [options.secretsPath],
   });
   const app = await createNautilusApp({ logger, projects, openCode, sync });
   await new Promise<void>((resolve) => app.server.listen(options.port, options.host, resolve));

@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { accessSync, constants, readFileSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -24,7 +24,13 @@ export type OpenCodeEvent = {
 export type OpenCodeService = {
   start: () => Promise<void>;
   createSession: (directory: string, title: string) => Promise<Session>;
-  prompt: (sessionId: string, directory: string, text: string, model?: ModelRef) => Promise<void>;
+  prompt: (
+    sessionId: string,
+    directory: string,
+    text: string,
+    model?: ModelRef,
+    system?: string,
+  ) => Promise<void>;
   listModels: () => Promise<ModelsResponse>;
 
   respondToPermission: (
@@ -45,6 +51,9 @@ export type OpenCodeProcessOptions = {
   dataDir?: string;
   startupTimeoutMs?: number;
   binary?: string;
+  // Folders OpenCode must not see, such as the runner's secrets. They are
+  // hidden inside a bubblewrap sandbox when the machine allows one.
+  hiddenPaths?: string[];
 };
 
 export class OpenCodeProcess implements OpenCodeService {
@@ -53,6 +62,7 @@ export class OpenCodeProcess implements OpenCodeService {
   private readonly dataDir: string;
   private readonly startupTimeoutMs: number;
   private readonly binary: string;
+  private readonly hiddenPaths: string[];
   private readonly logger: Logger;
   private child: ChildProcess | undefined;
   private spawnError: Error | undefined;
@@ -66,6 +76,7 @@ export class OpenCodeProcess implements OpenCodeService {
     this.startupTimeoutMs = options.startupTimeoutMs ?? 30_000;
     this.binary =
       options.binary ?? process.env.NAUTILUS_OPENCODE_BIN ?? packagedBinary() ?? "opencode";
+    this.hiddenPaths = options.hiddenPaths ?? [];
     this.logger = logger;
   }
 
@@ -101,21 +112,23 @@ export class OpenCodeProcess implements OpenCodeService {
       binary: this.binary,
     });
     this.spawnError = undefined;
-    this.child = spawn(
+    const [command, ...args] = await this.command([
       this.binary,
-      ["serve", `--hostname=${this.host}`, `--port=${String(this.port)}`],
-      {
-        env: {
-          ...process.env,
-          XDG_DATA_HOME: this.dataDir,
-          XDG_CONFIG_HOME: `${this.dataDir}/config`,
-          XDG_CACHE_HOME: `${this.dataDir}/cache`,
-        },
-        stdio: ["ignore", "pipe", "pipe"],
-
-        detached: true,
+      "serve",
+      `--hostname=${this.host}`,
+      `--port=${String(this.port)}`,
+    ]);
+    this.child = spawn(command ?? this.binary, args, {
+      env: {
+        ...process.env,
+        XDG_DATA_HOME: this.dataDir,
+        XDG_CONFIG_HOME: `${this.dataDir}/config`,
+        XDG_CACHE_HOME: `${this.dataDir}/cache`,
       },
-    );
+      stdio: ["ignore", "pipe", "pipe"],
+
+      detached: true,
+    });
     const child = this.child;
     // A binary that cannot be run is reported as an 'error' event on a later
     // tick, and an 'error' event with no listener kills the whole server. The
@@ -172,6 +185,37 @@ export class OpenCodeProcess implements OpenCodeService {
       dataDir: this.dataDir,
       startupMs: Date.now() - startedAt,
     });
+  }
+
+  // OpenCode runs commands as the runner's own user, so file permissions alone
+  // cannot keep it out of the secrets folder or the dev server's environment.
+  // The sandbox covers each hidden folder with an empty one and gives OpenCode
+  // its own process list, so neither the files nor /proc/<pid>/environ of the
+  // dev server are there to read. The network stays shared, so the runner
+  // still reaches it on loopback.
+  private async command(command: string[]): Promise<string[]> {
+    if (this.hiddenPaths.length === 0) return command;
+    if (!sandboxAvailable()) {
+      this.logger.warn("opencode_sandbox_unavailable", {});
+      return command;
+    }
+    for (const path of this.hiddenPaths) await mkdir(path, { recursive: true, mode: 0o700 });
+    return [
+      "bwrap",
+      "--bind",
+      "/",
+      "/",
+      "--dev-bind",
+      "/dev",
+      "/dev",
+      "--proc",
+      "/proc",
+      "--unshare-pid",
+      "--die-with-parent",
+      ...this.hiddenPaths.flatMap((path) => ["--tmpfs", path]),
+      "--",
+      ...command,
+    ];
   }
 
   private pidPath(): string {
@@ -258,12 +302,15 @@ export class OpenCodeProcess implements OpenCodeService {
     directory: string,
     text: string,
     model?: ModelRef,
+    system?: string,
   ): Promise<void> {
     const client = await this.clientOrStart();
     await client.session.promptAsync({
       path: { id: sessionId },
       body: {
         parts: [{ type: "text", text }],
+
+        ...(system ? { system } : {}),
 
         ...(model ? { model: { providerID: model.providerId, modelID: model.modelId } } : {}),
 
@@ -389,6 +436,32 @@ function boundedFetch(request: Request): Promise<Response> {
   return fetch(request, {
     signal: AbortSignal.any([request.signal, AbortSignal.timeout(requestTimeoutMs)]),
   });
+}
+
+let sandboxChecked: boolean | undefined;
+
+// bubblewrap needs user namespaces, which some machines turn off, so it is
+// tried once before OpenCode is started inside it.
+function sandboxAvailable(): boolean {
+  if (process.env.NAUTILUS_OPENCODE_SANDBOX === "off") return false;
+  sandboxChecked ??=
+    spawnSync(
+      "bwrap",
+      [
+        "--ro-bind",
+        "/",
+        "/",
+        "--dev-bind",
+        "/dev",
+        "/dev",
+        "--proc",
+        "/proc",
+        "--unshare-pid",
+        "true",
+      ],
+      { stdio: "ignore", timeout: 5_000 },
+    ).status === 0;
+  return sandboxChecked;
 }
 
 function freePort(host: string): Promise<number> {
