@@ -58,7 +58,9 @@ The Lightning port proxy is on the public internet, and it weakens the browser's
 
 **The desktop's own reach.** The Tauri capability file (`apps/desktop/src-tauri/capabilities/default.json`) is the boundary for the desktop itself. It can start exactly three programs with fixed argument validators: `ssh` with the control forward, `ssh` with the sync forward, and its own sync agent binary. It reads and writes only `~/.nautilus`, reads folder listings and `package.json` files for the project picker, makes HTTP requests only to `127.0.0.1`, and opens a file in its default app only under the home directory.
 
-**A known gap.** Any process on the runner that runs as the same Unix user can reach the loopback listeners and read `~/nautilus/secrets`. That includes the commands OpenCode runs. Running OpenCode as a separate user, or serving the control API on a Unix socket with a peer check, would close it. Whether Lightning allows either is still open.
+**OpenCode and secrets.** OpenCode runs as the runner's own user, so file permissions cannot keep it out of `~/nautilus/secrets`. When the machine allows unprivileged user namespaces, as Lightning does, the runner starts it inside bubblewrap. There the secrets folder is an empty tmpfs and OpenCode has its own PID namespace, so neither the preview values nor `/proc/<pid>/environ` of the dev server are readable. The network is shared, so the runner still reaches it on loopback. Each prompt tells the agent the names of the preview's keys, never their values, and the runner replaces any stored value of four characters or more with `[redacted:KEY]` in OpenCode's output before it reaches the registry or the phone. A value split across two streamed deltas can still reach a phone that is watching live; the stored copy is redacted whole.
+
+**A known gap.** Any process on the runner that runs as the same Unix user can reach the loopback listeners, sandboxed OpenCode included. Outside the sandbox, such as on a machine without user namespaces, it can also read `~/nautilus/secrets`. Serving the control API on a Unix socket with a peer check would close the first part.
 
 ## Where state lives
 
@@ -68,6 +70,7 @@ Runner, under `~/nautilus/`:
 | --------------------- | -------------------------------------------------------------------------------------------------- |
 | `registry.sqlite`     | Projects, phones, pairing codes, preview tokens and sessions, agent sessions and their event logs. |
 | `secrets/auth-secret` | Signs phone sessions and preview links. Created on first boot, mode 0600, never leaves the runner. |
+| `secrets/projects/`   | Each project's preview values, one 0600 file per project, written only by the desktop.             |
 | `projects/<id>/`      | The project's files, where the agent works and the dev server runs.                                |
 | `shadow/<id>.git`     | The project's shadow repository.                                                                   |
 | `sync-state/<id>/`    | The sync base, sync history, transactions, recovery records and cached results.                    |

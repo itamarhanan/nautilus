@@ -74,7 +74,7 @@ The agent's work needs history, checkpoints, three-way merges and undo. Your own
 - **Sync is incremental.** A `git bundle` carries only the commits after the last shared base. It is checked by SHA-256 and for ancestry before it is imported.
 - **Merges are preflighted.** Both sides are merged in a throwaway index, with `git read-tree -m` and `git merge-file` for files both sides edited, before anything is written. A conflict applies nothing, not even partly. You pick a side per file and apply again.
 - **Applies are transactional.** A transaction record and a recovery bundle are written before the first file changes. An interrupted apply is rolled back on the next start and never reported as synced.
-- **What Git cannot round-trip is refused.** Symlinks, submodules, `.gitmodules`, Git LFS pointers and oversized files fail with a clear error. Dependencies, caches and `.env` files stay out. A nested checkout stays out too, and the desktop tells you once.
+- **What Git cannot round-trip is refused.** Symlinks, submodules, `.gitmodules`, Git LFS pointers and oversized files fail with a clear error. Dependencies, caches and secret files stay out: `.env*`, `.envrc`, `.dev.vars`, keys and certificates (`*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa*` and the like). A file that was synced before it counted as secret is never deleted from either side. A nested checkout stays out too, and the desktop tells you once.
 - **Every agent turn is a checkpoint.** The phone lists the files each turn changed and can undo one turn while keeping the ones after it, the way `git revert` does. An undo is a checkpoint too, so it can be undone.
 
 ### The PC holds no Nautilus credential
@@ -86,6 +86,15 @@ The only secret on the laptop is the Lightning SSH key, and Lightning issues and
 - **The PC mints the grants.** For each pull or push the agent signs a grant for one project and one direction, capped at 10 minutes whatever the UI asks for. The runner forwards it and cannot make one. A push grant cannot call `apply`, so a push never writes to the PC.
 - **The launch key dies with the app.** The agent reads a 32-byte key from stdin and exits when the desktop closes that pipe. Restart the app and every earlier grant stops working.
 - **Little Rust.** `main.rs` registers plugins and owns what a web page cannot: the tray icon, hiding to the tray on close and keeping one instance. All sync policy lives in the capability manifest and TypeScript.
+
+### Preview values never travel with the code
+
+A preview needs the variables your dev command reads from `.env`, but sync leaves those files on the PC. So each project has an **Environment variables** section in the desktop, much like Vercel's. It lists the keys in your local env files, and you pick the ones the preview gets, changing a value just for the preview where needed. Use preview-only credentials, such as a dev database or test-mode keys: a running dev server holds its values in memory, so whoever takes over the box can read them.
+
+- **The PC owns the values.** The desktop keeps them in the OS keychain and sends them when you save and when you push. Saved values can be replaced, never shown again.
+- **The runner stores them outside the project.** They live in `~/nautilus/secrets/projects/<id>.json`, mode 0600, so a restart needs no desktop. No route returns them; reads list key names only.
+- **Only the dev server gets them.** It starts from a minimal environment plus the project's values, so it never inherits the runner's own secrets or model-provider keys. Changing the values restarts a running preview, and the preview shows a page that reloads itself until the new dev server answers.
+- **The agent gets key names only.** OpenCode runs in a bubblewrap sandbox where the secrets folder is empty and the dev server's process is not there to inspect. Any value of four characters or more that still shows up in its output is replaced with `[redacted:KEY]` before it is stored or reaches the phone.
 
 ### The edge proxy is hostile
 
@@ -302,6 +311,7 @@ Everything has a working default. The settings worth knowing:
 | `NAUTILUS_SYNC_MAX_FILE_BYTES`   | `10 MB`                 | Largest file a sync carries                                               |
 | `NAUTILUS_SYNC_MAX_TOTAL_BYTES`  | `100 MB`                | Largest project a sync carries                                            |
 | `NAUTILUS_SYNC_MAX_FILE_COUNT`   | `10 000`                | Most files a sync carries                                                 |
+| `NAUTILUS_OPENCODE_SANDBOX`      | _(on when available)_   | `off` runs OpenCode without its bubblewrap sandbox                        |
 | `NAUTILUS_LOG_FORMAT` / `_LEVEL` | `json` / `debug`        | `pretty` gives a readable terminal log                                    |
 
 `scripts/dev-local.sh` writes a working `.env.local` for local mode.

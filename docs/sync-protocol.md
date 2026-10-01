@@ -19,7 +19,9 @@ Regular files sync with their content and executable bit, including binary files
 
 Some things cannot survive a round trip through Git, so a sync refuses them outright: symlinks, special files, submodule gitlinks, `.gitmodules`, Git LFS pointers, and a received tree with anything under a `.git` path.
 
-Some things belong to the machine rather than the project, so they stay out: whatever the project's `.gitignore` ignores, `node_modules`, build output, caches, logs and `.env` files. A directory that holds its own `.git`, such as a nested checkout or a worktree, stays out too. It is left untouched on disk, and the desktop mentions it once.
+Some things belong to the machine rather than the project, so they stay out: whatever the project's `.gitignore` ignores, `node_modules`, build output, caches, logs and secret files (`.env`, `.env.*`, `.envrc`, `.dev.vars`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa*`, `id_dsa*`, `id_ecdsa*`, `id_ed25519*`). Preview values reach the runner through its environment store instead (see the README).
+
+History from before a file counted as secret can still carry it. Each side drops secret paths from a tree before applying it, and forgets them in its index first, so a sync neither writes such a file nor deletes the copy already on disk. The review never lists them. A directory that holds its own `.git`, such as a nested checkout or a worktree, stays out too. It is left untouched on disk, and the desktop mentions it once.
 
 ## Requests
 
