@@ -28,7 +28,16 @@ function legacyCommit(gitDir: string, files: Record<string, string>, parent?: st
   const run = (args: string[], input?: string): string =>
     execFileSync("git", ["--git-dir", gitDir, ...args], {
       input,
-      env: { ...process.env, GIT_INDEX_FILE: join(gitDir, "legacy-index") },
+      // Machines without a git identity, such as CI runners, refuse to commit
+      // unless one is given.
+      env: {
+        ...process.env,
+        GIT_INDEX_FILE: join(gitDir, "legacy-index"),
+        GIT_AUTHOR_NAME: "Nautilus",
+        GIT_AUTHOR_EMAIL: "sync@nautilus.local",
+        GIT_COMMITTER_NAME: "Nautilus",
+        GIT_COMMITTER_EMAIL: "sync@nautilus.local",
+      },
     })
       .toString("utf8")
       .trim();
