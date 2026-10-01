@@ -1,6 +1,7 @@
 import type { IncomingMessage } from "node:http";
 import type { ProjectConfig, ProjectRecord } from "@nautilus/types";
 import type { Auth } from "../auth";
+import type { EnvironmentStore } from "../environment";
 import { HttpError } from "../errors";
 import type { LifecycleJournal } from "../lifecycle-journal";
 import type { Logger } from "../logger";
@@ -18,6 +19,7 @@ export type AppContext = {
   logger: Logger;
   lifecycle: LifecycleJournal;
   projectManager: ProjectManager;
+  environment: EnvironmentStore;
 
   projectMap: Map<string, ProjectConfig>;
   previewTokens: PreviewTokens;

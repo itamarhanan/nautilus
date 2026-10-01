@@ -2,6 +2,7 @@ import { lstat, mkdir, realpath, rm } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
 import type { ProjectConfig } from "@nautilus/types";
 import { ConfigurationError, derivePreviewOrigin, parseProjectConfig } from "../config";
+import { parseEnvironmentUpdate } from "../environment";
 import { HttpError } from "../errors";
 import { bodyString, readJson, requestProjectId } from "../http/body";
 import { firstHeader, sendJson } from "../http/respond";
@@ -67,6 +68,7 @@ export function projectRoutes(context: AppContext): Route[] {
     registry,
     projectMap,
     projectManager,
+    environment,
     previewTokens,
     sync,
     lifecycle,
@@ -196,6 +198,7 @@ export function projectRoutes(context: AppContext): Route[] {
           throw error;
         }
         await projectManager.stop(project.id);
+        await environment.remove(project.id);
         registry.deleteProject(project.id);
         await lifecycle.clearDegradedProject(project.id);
         if (!(await removeProjectFolder(project.remotePath, settings.projectsRoot))) {
@@ -203,6 +206,35 @@ export function projectRoutes(context: AppContext): Route[] {
         }
         sendJson(response, 204, null);
         return 204;
+      },
+    },
+    {
+      method: "GET",
+      path: "/api/projects/:projectId/env",
+      access: "admin",
+      handle: async ({ response, params }) => {
+        const project = requireProject(context, params.projectId);
+        sendJson(response, 200, await environment.describe(project.id));
+        return 200;
+      },
+    },
+    {
+      // Write-only: the whole set is replaced and only key names come back.
+      method: "PUT",
+      path: "/api/projects/:projectId/env",
+      access: "admin",
+      handle: async ({ request, response, params }) => {
+        const project = requireProject(context, params.projectId);
+        const variables = parseEnvironmentUpdate(await readJson(request));
+        if (await environment.replace(project.id, variables)) {
+          logger.info("project_environment_updated", {
+            projectId: project.id,
+            keys: Object.keys(variables).length,
+          });
+          projectManager.scheduleRestart(project.id);
+        }
+        sendJson(response, 200, await environment.describe(project.id));
+        return 200;
       },
     },
     {
