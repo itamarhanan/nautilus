@@ -93,7 +93,13 @@ if [[ ! -f "${env_file}" && -f "${SECRET_DIR}/runner.env" ]]; then
 fi
 # The env file is optional: it holds model-provider keys and overrides. The
 # server creates its own auth secret in ${SECRET_DIR}/auth-secret on first boot.
-for secret_file in "${SECRET_DIR}"/*; do
+for secret_dir in "${SECRET_DIR}" "${SECRET_DIR}/projects"; do
+  if [[ -d "${secret_dir}" && -O "${secret_dir}" ]]; then
+    chmod 700 "${secret_dir}"
+  fi
+done
+# projects/ holds each project's preview values, which the desktop sends.
+for secret_file in "${SECRET_DIR}"/* "${SECRET_DIR}"/projects/*; do
   if [[ -f "${secret_file}" && -O "${secret_file}" ]]; then
     chmod 600 "${secret_file}"
   fi
