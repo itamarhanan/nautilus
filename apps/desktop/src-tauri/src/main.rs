@@ -4,6 +4,8 @@
 
 
 
+mod environment;
+
 use std::time::Duration;
 
 use tauri::menu::{Menu, MenuItem};
@@ -50,6 +52,12 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
+        .invoke_handler(tauri::generate_handler![
+            environment::env_load,
+            environment::env_save,
+            environment::env_delete,
+            environment::env_scan
+        ])
         .setup(|app| {
             let open = MenuItem::with_id(app, "open", "Open Nautilus", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit Nautilus", true, None::<&str>)?;

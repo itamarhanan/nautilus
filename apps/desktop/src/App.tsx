@@ -9,6 +9,7 @@ import { StoreProvider, useApp } from "./context";
 import { AgentProcess } from "./lib/agent";
 import { ControlChannel } from "./lib/control";
 import { openInEditor } from "./lib/editor";
+import { tauriEnvironment } from "./lib/environment";
 import {
   desktopPaths,
   folderIo,
@@ -172,6 +173,7 @@ export default function App() {
       loadState,
       saveState,
       folderIo,
+      environment: tauriEnvironment,
       spawn: tauriSpawner,
       localMode,
       openFile: openInEditor,

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-env-load"
+description = "Enables the env_load command without any pre-configured scope."
+commands.allow = ["env_load"]
+
+[[permission]]
+identifier = "deny-env-load"
+description = "Denies the env_load command without any pre-configured scope."
+commands.deny = ["env_load"]

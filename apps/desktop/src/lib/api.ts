@@ -3,6 +3,8 @@ import type {
   DeviceResponse,
   LocalSyncStatusResponse,
   PairingCodeResponse,
+  ProjectEnvironment,
+  ProjectEnvironmentUpdate,
   ProjectRecord,
   RecoverySummary,
   SyncConflict,
@@ -198,6 +200,20 @@ export class ControlApi {
         changes,
       )
     ).project;
+  }
+
+  environment(projectId: string): Promise<ProjectEnvironment> {
+    return this.request("GET", `/api/projects/${encodeURIComponent(projectId)}/env`);
+  }
+
+  // Replaces the runner's whole set. The runner restarts a running preview
+  // when the set changed.
+  updateEnvironment(
+    projectId: string,
+    variables: Record<string, string>,
+  ): Promise<ProjectEnvironment> {
+    const body: ProjectEnvironmentUpdate = { variables };
+    return this.request("PUT", `/api/projects/${encodeURIComponent(projectId)}/env`, body);
   }
 
   async deleteProject(projectId: string): Promise<void> {

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Permissions for the Nautilus desktop app. It reads and writes only ~/.nautilus, reads folder listings, package.json files and ~/.ssh/config for project and SSH detection, talks HTTP only to loopback, and can start exactly three programs: ssh twice and its own sync agent. It also shows notifications, opens a project file in its default app for a conflict, and closes its own window when quitting from the tray.",
+  "description": "Permissions for the Nautilus desktop app. It reads and writes only ~/.nautilus, reads folder listings, package.json files and ~/.ssh/config for project and SSH detection, talks HTTP only to loopback, and can start exactly three programs: ssh twice and its own sync agent. It also shows notifications, opens a project file in its default app for a conflict, closes its own window when quitting from the tray, and keeps each project's preview variables in the OS keychain. It reads env files only inside folders added as projects.",
   "windows": ["main"],
   "permissions": [
     "core:path:default",
@@ -149,6 +149,10 @@
       ]
     },
     "shell:allow-stdin-write",
-    "shell:allow-kill"
+    "shell:allow-kill",
+    "allow-env-load",
+    "allow-env-save",
+    "allow-env-delete",
+    "allow-env-scan"
   ]
 }
