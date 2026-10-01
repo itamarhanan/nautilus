@@ -346,3 +346,53 @@ test("a preview socket reaches a dev server that takes sockets only from localho
     await close(dev);
   }
 });
+
+test("a preview that is starting shows a page that reloads itself", async () => {
+  const app = await createNautilusApp({
+    registryPath: ":memory:",
+    authSecret: testSecret,
+    projects: [project()],
+    logger: new Logger(() => undefined),
+  });
+  const ports = await listen(app);
+  const gateway = createNautilusGateway({
+    apiTarget: "http://127.0.0.1:1",
+    auth: app.auth,
+    logger: new Logger(() => undefined),
+    previewTokens: app.previewTokens,
+    registry: app.registry,
+    secureCookies: false,
+    webTarget: "http://127.0.0.1:1",
+  });
+  const gatewayPort = await bind(gateway.server);
+  const previewPort = await bind(gateway.previewServer);
+  try {
+    const { cookie } = await pairDevice(ports);
+    app.registry.setActiveProjectId("demo");
+    app.registry.updateProjectState("demo", "starting", null);
+    for (const url of [
+      `http://127.0.0.1:${String(gatewayPort)}/preview/demo/`,
+      `http://127.0.0.1:${String(previewPort)}/`,
+    ]) {
+      const page = await fetch(url, { headers: { cookie, accept: "text/html" } });
+      expect(page.status).toBe(503);
+      expect(page.headers.get("content-type")).toContain("text/html");
+      expect(await page.text()).toContain('http-equiv="refresh"');
+
+      const asset = await fetch(url, { headers: { cookie, accept: "application/json" } });
+      expect(asset.status).toBe(503);
+      expect(asset.headers.get("content-type")).toContain("application/json");
+    }
+
+    // Once it is up, requests reach the dev server again.
+    app.registry.updateProjectState("demo", "running", null);
+    const running = await fetch(`http://127.0.0.1:${String(gatewayPort)}/preview/demo/`, {
+      headers: { cookie, accept: "text/html" },
+    });
+    expect(running.status).not.toBe(503);
+  } finally {
+    await close(gateway.server);
+    await close(gateway.previewServer);
+    await app.close();
+  }
+});
