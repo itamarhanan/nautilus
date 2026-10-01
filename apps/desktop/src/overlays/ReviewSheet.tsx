@@ -227,6 +227,13 @@ function ReviewBody({
         <ProgressBar label={STEP_LABEL.applying} isIndeterminate />
       ) : null}
       {review.phase === "ready" ? <ReadyBody view={view} /> : null}
+      {review.phase === "ready" && review.environmentChanges.length > 0 ? (
+        <Text type="supporting">
+          {plural(review.environmentChanges.length, "preview variable")} also{" "}
+          {review.environmentChanges.length === 1 ? "goes" : "go"} to the runner:{" "}
+          <span className="select-text font-mono">{review.environmentChanges.join(", ")}</span>
+        </Text>
+      ) : null}
       {!view.resolving && view.conflicts.length > 0 && !view.diff ? (
         <VStack gap={1}>
           {view.conflicts.map((conflict) => (

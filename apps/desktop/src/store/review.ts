@@ -1,6 +1,7 @@
 import { friendlyError, messageOf } from "../lib/errors";
 import { plural } from "../lib/format";
 import { SyncSession } from "../lib/sync";
+import { pendingEnvironment, sendEnvironment } from "./environment";
 import type { StoreRuntime } from "./runtime";
 import { conflictsOf, type DesktopActions, type Review } from "./types";
 
@@ -43,6 +44,7 @@ export function reviewSlice(
           result: null,
           error: null,
           resolutions: {},
+          environmentChanges: [],
           background: false,
         },
       });
@@ -62,8 +64,13 @@ export function reviewSlice(
       runtime.session = session;
       try {
         const preview = await session.preview();
+        const environmentChanges =
+          direction === "push" && preview.status === "ok"
+            ? await pendingEnvironment(runtime, projectId)
+            : [];
         patchReview(id, {
           preview,
+          environmentChanges,
           phase: preview.status === "ok" ? "ready" : "blocked",
           error: preview.status === "ok" ? null : (preview.error?.message ?? null),
         });
@@ -99,6 +106,15 @@ export function reviewSlice(
           phase: ok ? "done" : resolvable ? "resolving" : "blocked",
           error: ok ? null : (result.error?.message ?? null),
         });
+        if (ok && review.direction === "push" && review.environmentChanges.length > 0) {
+          await sendEnvironment(runtime, review.projectId).catch((error: unknown) => {
+            get().notify({
+              tone: "warning",
+              title: "The runner did not get the variables",
+              body: messageOf(error, "Save them again from the project's settings."),
+            });
+          });
+        }
         const project = get().appState.projects.find((entry) => entry.id === review.projectId);
         const files = review.preview?.diff?.files.length ?? result.diff?.files.length ?? 0;
         const latest = get().review;
