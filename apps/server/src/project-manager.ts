@@ -4,6 +4,7 @@ import { createConnection, createServer, type AddressInfo } from "node:net";
 import { join, sep } from "node:path";
 import type { Readable } from "node:stream";
 import type { ProjectConfig, ProjectRecord } from "@nautilus/types";
+import { baseEnvironment } from "./environment";
 import { HttpError } from "./errors";
 import { pickListener, sessionListeners, sessionMembers } from "./listeners";
 import type { Logger } from "./logger";
@@ -16,6 +17,9 @@ type ActiveProject = {
 
 const OUTPUT_TAIL_BYTES = 4096;
 const INSTALL_TIMEOUT_MS = 5 * 60 * 1000;
+// Saving several keys in a row, or pushing code and keys together, lands as
+// one restart rather than one per change.
+const RESTART_DELAY_MS = 1500;
 // Resolved against the package root, from src/ as from the dist/ bundle, the
 // same way app.ts finds package.json.
 const devPortShim = new URL("../dev-port-shim.mjs", import.meta.url);
@@ -171,6 +175,7 @@ export class ProjectManager {
   // waits for them, so none of them writes to the registry after it closes.
   private readonly cleanups = new Set<Promise<void>>();
   private lifecycleQueue: Promise<void> = Promise.resolve();
+  private readonly restarts = new Map<string, NodeJS.Timeout>();
 
   constructor(
     private readonly registry: Registry,
@@ -180,6 +185,8 @@ export class ProjectManager {
     private readonly projectHasCode?: (projectId: string) => Promise<boolean>,
     // The ports of the runner's own services, which no dev server may take.
     private readonly reservedPorts: readonly number[] = [],
+    // The preview values the desktop sent for a project.
+    private readonly projectEnvironment?: (projectId: string) => Promise<Record<string, string>>,
   ) {}
 
   activeProject(): ProjectRecord | undefined {
@@ -290,14 +297,20 @@ export class ProjectManager {
       await this.installDependencies(id, configured.remotePath);
 
       const { executable, args } = parseDevCommand(configured.devCommand);
+      const variables = (await this.projectEnvironment?.(id)) ?? {};
       const child = spawn(executable, args, {
         cwd: configured.remotePath,
         detached: true,
         env: {
-          ...process.env,
-
+          ...baseEnvironment(),
+          ...variables,
+          // The gateway proxies to the port the runner picked, so a PORT the
+          // project sets is overridden.
           PORT: String(port),
-          NODE_OPTIONS: devNodeOptions(process.env.NODE_OPTIONS, this.reservedPorts),
+          NODE_OPTIONS: devNodeOptions(
+            variables.NODE_OPTIONS ?? process.env.NODE_OPTIONS,
+            this.reservedPorts,
+          ),
           NAUTILUS_PROJECT_ID: id,
         },
         stdio: ["ignore", "pipe", "pipe"],
@@ -390,7 +403,7 @@ export class ProjectManager {
     this.logger.info("project_dependencies_installing", { projectId: id });
     const child = spawn("pnpm", ["install", "--frozen-lockfile", "--prefer-offline"], {
       cwd: directory,
-      env: { ...process.env, CI: "true" },
+      env: { ...baseEnvironment(), CI: "true" },
       stdio: ["ignore", "pipe", "pipe"],
       timeout: INSTALL_TIMEOUT_MS,
     });
@@ -418,7 +431,36 @@ export class ProjectManager {
   }
 
   async stop(id: string): Promise<ProjectRecord> {
+    this.cancelRestart(id);
     return this.serialized(() => this.stopInternal(id));
+  }
+
+  // New values only reach a dev server through a fresh process. A project
+  // that is not running picks them up on its next start instead.
+  scheduleRestart(id: string): void {
+    if (!this.active.has(id)) return;
+    this.cancelRestart(id);
+    const timer = setTimeout(() => {
+      this.restarts.delete(id);
+      void this.serialized(async () => {
+        if (!this.active.has(id)) return;
+        this.logger.info("project_restarting", { projectId: id });
+        await this.stopInternal(id);
+        await this.startInternal(id);
+      }).catch((error: unknown) => {
+        this.logger.error("project_restart_failed", {
+          projectId: id,
+          error: error instanceof Error ? error.message : "unknown_error",
+        });
+      });
+    }, RESTART_DELAY_MS);
+    timer.unref();
+    this.restarts.set(id, timer);
+  }
+
+  private cancelRestart(id: string): void {
+    clearTimeout(this.restarts.get(id));
+    this.restarts.delete(id);
   }
 
   private async stopInternal(id: string): Promise<ProjectRecord> {
@@ -441,6 +483,7 @@ export class ProjectManager {
   }
 
   async stopAll(): Promise<void> {
+    for (const id of [...this.restarts.keys()]) this.cancelRestart(id);
     await this.serialized(async () => {
       const ids = new Set([...this.active.keys()]);
       const durable = this.registry.getActiveProjectId();
