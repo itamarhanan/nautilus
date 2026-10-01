@@ -55,6 +55,29 @@ const redeemPage = `<!doctype html>
 </html>
 `;
 
+// Shown while a dev server starts or restarts, for instance after its
+// environment changed. It reloads itself until the dev server answers.
+const startingPage = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="refresh" content="2" />
+    <title>Nautilus preview</title>
+  </head>
+  <body>
+    <p>Restarting the preview…</p>
+  </body>
+</html>
+`;
+
+function wantsPage(request: IncomingMessage): boolean {
+  return (
+    (request.method === "GET" || request.method === "HEAD") &&
+    (request.headers.accept ?? "").includes("text/html")
+  );
+}
+
 function withoutPreviewToken(url: URL): string {
   url.searchParams.delete("token");
   return `${url.pathname}${url.search}`;
@@ -340,6 +363,19 @@ export function createNautilusGateway(options: GatewayOptions): NautilusGateway 
       return;
     }
 
+    if (options.registry.getProject(scope.projectId)?.state === "starting") {
+      if (wantsPage(request)) {
+        response.writeHead(503, {
+          "cache-control": "no-store",
+          "content-type": "text/html; charset=utf-8",
+          "retry-after": "2",
+        });
+        response.end(startingPage);
+      } else {
+        sendError(response, 503, "preview_starting", "The preview is starting");
+      }
+      return;
+    }
     const target = options.registry.activeDevTarget(scope.projectId) ?? "http://127.0.0.1:0";
     preparePreviewRequest(request, target);
     proxyRequest(request, response, {
