@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import type { ProjectConfig } from "@nautilus/types";
 import { Auth } from "./auth";
 import { ConfigurationError, loadProjects, loadServerOptions, type ServerOptions } from "./config";
+import { EnvironmentStore } from "./environment";
 import { HttpError, toHttpError } from "./errors";
 import { controlGuard } from "./http/control";
 import { sendError } from "./http/respond";
@@ -119,12 +120,11 @@ export async function createNautilusApp(options: AppOptions = {}): Promise<Nauti
     options.lifecycle ?? new LifecycleJournal(options.lifecyclePath ?? serverOptions.lifecyclePath);
   await lifecycle.initialize();
   await lifecycle.transition("starting");
+  const secretsPath = options.secretsPath ?? serverOptions.secretsPath;
   const authSecret =
     options.authSecret ??
     serverOptions.authSecret ??
-    (await loadOrCreateSecret(
-      join(options.secretsPath ?? serverOptions.secretsPath, "auth-secret"),
-    ));
+    (await loadOrCreateSecret(join(secretsPath, "auth-secret")));
   if (authSecret.length < 32) {
     throw new ConfigurationError("NAUTILUS_AUTH_SECRET must be at least 32 characters");
   }
@@ -163,6 +163,7 @@ export async function createNautilusApp(options: AppOptions = {}): Promise<Nauti
     (sessionTokenHash) => registry.findPreviewSession(sessionTokenHash)?.projectId,
     options.previewSessionSeconds ?? serverOptions.previewSessionSeconds,
   );
+  const environment = new EnvironmentStore(join(secretsPath, "projects"));
   const sync = options.sync;
   for (const project of projectMap.values()) {
     sync?.addProject(project);
@@ -174,6 +175,7 @@ export async function createNautilusApp(options: AppOptions = {}): Promise<Nauti
     options.devReadyTimeoutMs ?? serverOptions.devReadyTimeoutMs,
     sync ? (projectId) => sync.hasCode(projectId) : undefined,
     runnerPorts(serverOptions, options.previewPort ?? serverOptions.previewPort),
+    (projectId) => environment.variables(projectId),
   );
   if (sync) {
     sync.connect({
@@ -194,7 +196,7 @@ export async function createNautilusApp(options: AppOptions = {}): Promise<Nauti
   await projectManager.stopLeftovers();
   await projectManager.recoverActiveProject();
   const sessions = options.openCode
-    ? new SessionService(options.openCode, registry, projectMap, logger, sync)
+    ? new SessionService(options.openCode, registry, projectMap, logger, sync, environment)
     : undefined;
   if (options.openCode && sessions) {
     await options.openCode.start();
@@ -213,6 +215,7 @@ export async function createNautilusApp(options: AppOptions = {}): Promise<Nauti
     logger,
     lifecycle,
     projectManager,
+    environment,
     projectMap,
     previewTokens,
     sessions,

@@ -8,6 +8,7 @@ import type {
   SessionStatus,
   SyncDiff,
 } from "@nautilus/types";
+import { type EnvironmentStore, redactDeep } from "./environment";
 import type { Logger } from "./logger";
 import type { Checkpoint, RevertResult } from "./sync";
 import type { Event, OpenCodeEvent, OpenCodeService } from "./opencode";
@@ -149,6 +150,7 @@ export class SessionService {
   private readonly projects: ReadonlyMap<string, ProjectConfig>;
   private readonly logger: Logger;
   private readonly workspace: SessionWorkspace | undefined;
+  private readonly environment: EnvironmentStore | undefined;
   private readonly listeners = new Map<string, Set<Listener>>();
   private readonly subagents = new Map<string, string | null>();
   private consuming = false;
@@ -161,12 +163,32 @@ export class SessionService {
     logger: Logger,
 
     workspace?: SessionWorkspace,
+    environment?: EnvironmentStore,
   ) {
     this.openCode = openCode;
     this.registry = registry;
     this.projects = projects;
     this.logger = logger;
     this.workspace = workspace;
+    this.environment = environment;
+  }
+
+  // The agent never gets a project's values, but a file it reads or a command
+  // it runs could still print one. Hiding them here keeps them out of the
+  // registry and off the phone, whichever way they got into the output.
+  private async redactor(projectId: string): Promise<(text: string) => string> {
+    return (await this.environment?.redactor(projectId)) ?? ((text) => text);
+  }
+
+  // Key names only, so the agent can write code that reads them.
+  private async environmentNote(projectId: string): Promise<string | undefined> {
+    const { keys } = (await this.environment?.describe(projectId)) ?? { keys: [] };
+    if (keys.length === 0) return undefined;
+    return [
+      "The project's preview receives these environment variables from Nautilus:",
+      keys.join(", "),
+      "Their values are kept from you on purpose. Read them through the environment (process.env and the like) in code, and do not create .env files to supply them.",
+    ].join("\n");
   }
 
   private projectPath(projectId: string): string {
@@ -242,14 +264,16 @@ export class SessionService {
     // the registry; events that land in between have nowhere to go.
     if (!this.projects.has(session.projectId)) return;
 
+    const redact = await this.redactor(session.projectId);
     if ((event.payload.type as string) === DELTA_EVENT) {
-      this.publishDelta(session, event.payload, subagent);
+      this.publishDelta(session, event.payload, redact, subagent);
       return;
     }
-    const translated = payloadForEvent(event.payload);
-    if (!translated) {
+    const untranslated = payloadForEvent(event.payload);
+    if (!untranslated) {
       return;
     }
+    const translated = { ...untranslated, payload: redactDeep(untranslated.payload, redact) };
     if (subagent) {
       if (SUBAGENT_TERMINAL.has(translated.type)) return;
       this.publish(
@@ -363,10 +387,18 @@ export class SessionService {
     }
   }
 
-  private publishDelta(session: SessionRecord, event: Event, subagent?: string): void {
+  // A value split across two deltas gets past this, but the part's final
+  // update, the copy that is stored and replayed, is hidden whole.
+  private publishDelta(
+    session: SessionRecord,
+    event: Event,
+    redact: (text: string) => string,
+    subagent?: string,
+  ): void {
     const properties = record(event.properties);
     const partId = stringValue(properties.partID);
-    const delta = stringValue(properties.delta);
+    const raw = stringValue(properties.delta);
+    const delta = raw === undefined ? undefined : redact(raw);
     if (!partId || !delta) return;
     this.publish({
       sessionId: session.id,
@@ -448,6 +480,7 @@ export class SessionService {
         this.projectPath(session.projectId),
         text,
         model,
+        await this.environmentNote(session.projectId),
       );
     } catch (error) {
       const failed = this.registry.appendAgentSessionEvent(id, "session.error", {
