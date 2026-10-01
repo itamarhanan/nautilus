@@ -140,13 +140,14 @@ export function projectsSlice(
       // the disk write, so no render or status poll sees the project gone from
       // state.json while the selection, the route or the runner list still
       // name it.
-      const { appState, status, history } = get();
+      const { appState, status, history, environments } = get();
       const next = local ? withoutProject(appState, projectId) : appState;
       set({
         appState: next,
         projects: get().projects.filter((project) => project.id !== projectId),
         status: withoutKey(status, projectId),
         history: withoutKey(history, projectId),
+        environments: withoutKey(environments, projectId),
         ...(local
           ? {
               selectedProjectId: next.projects.at(0)?.id ?? null,
@@ -174,6 +175,8 @@ export function projectsSlice(
             },
       );
       if (local) {
+        // The runner deletes its copy along with the project.
+        await services.environment.remove(projectId).catch(() => undefined);
         try {
           await persistState(next);
         } catch (error) {

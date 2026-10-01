@@ -2,6 +2,7 @@ import { createStore, type StoreApi } from "zustand/vanilla";
 import { inferDevCommand, type FolderCandidate } from "./lib/folders";
 import { emptyState } from "./lib/state";
 import { appSlice } from "./store/app";
+import { environmentSlice } from "./store/environment";
 import { navigationSlice } from "./store/navigation";
 import { projectsSlice } from "./store/projects";
 import { reviewSlice } from "./store/review";
@@ -37,6 +38,7 @@ export function createDesktopStore(services: DesktopServices): StoreApi<DesktopS
       selectedProjectId: null,
       status: {},
       history: {},
+      environments: {},
       route: homeRoute,
       settingsReturn: homeRoute,
       paletteOpen: false,
@@ -51,6 +53,7 @@ export function createDesktopStore(services: DesktopServices): StoreApi<DesktopS
       ...navigationSlice(runtime),
       ...runnerSlice(runtime),
       ...projectsSlice(runtime),
+      ...environmentSlice(runtime),
       ...reviewSlice(runtime),
     };
   });

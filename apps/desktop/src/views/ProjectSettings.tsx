@@ -8,6 +8,7 @@ import { Heading, Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { Timestamp } from "@astryxdesign/core/Timestamp";
 import { Copy, Trash2 } from "lucide-react";
+import { EnvironmentCard } from "../components/EnvironmentCard";
 import { useApp } from "../context";
 import { readableStatus } from "@nautilus/copy";
 import type { StateProject } from "../lib/state";
@@ -21,6 +22,8 @@ export function ProjectSettings({ project }: { project: StateProject }) {
   return (
     <>
       <GeneralForm key={project.id} project={project} />
+
+      <EnvironmentCard key={`env-${project.id}`} projectId={project.id} />
 
       <Card padding={5}>
         <MetadataList label={{ position: "start", width: 120 }}>

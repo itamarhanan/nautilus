@@ -3,6 +3,7 @@ import type {
   DeviceResponse,
   LocalSyncStatusResponse,
   PairingCodeResponse,
+  ProjectEnvironment,
   ProjectRecord,
   SyncConflict,
   SyncDirection,
@@ -18,6 +19,7 @@ import type { DesktopPaths } from "../lib/files";
 import type { FolderCandidate, FolderIo } from "../lib/folders";
 import type { Spawner } from "../lib/process";
 import type { DesktopSettings, SettingsErrors } from "../lib/settings";
+import type { EnvironmentStore, ScannedEnvFile } from "../lib/environment";
 import type { AppState } from "../lib/state";
 import type { SyncStep } from "../lib/sync";
 
@@ -53,6 +55,9 @@ export type Review = {
 
   resolutions: SyncResolutions;
 
+  // Variable names a push would send to the runner, never their values.
+  environmentChanges: string[];
+
   background: boolean;
 };
 
@@ -85,6 +90,10 @@ type DesktopState = {
   selectedProjectId: string | null;
   status: Partial<Record<string, ProjectStatus>>;
   history: Partial<Record<string, SyncEvent[]>>;
+
+  // The keys each runner copy holds; null when the runner is too old to hold
+  // variables.
+  environments: Partial<Record<string, ProjectEnvironment | null>>;
   route: Route;
 
   settingsReturn: Route;
@@ -125,6 +134,17 @@ export type DesktopActions = {
   ) => Promise<string | null>;
   removeProject: (projectId: string) => Promise<string | null>;
   reregisterProject: (projectId: string) => Promise<void>;
+  readEnvironment: (projectId: string) => Promise<{
+    variables: Record<string, string>;
+    keychain: boolean;
+    files: ScannedEnvFile[];
+
+    // Why the project's env files could not be read, if they could not.
+    scanError: string | null;
+  }>;
+  refreshEnvironment: (projectId: string) => Promise<void>;
+
+  saveEnvironment: (projectId: string, variables: Record<string, string>) => Promise<string | null>;
   touchFolder: (path: string) => void;
   newPairingCode: () => Promise<void>;
   refreshDevices: () => Promise<void>;
@@ -161,6 +181,7 @@ export type DesktopServices = {
   loadState: (paths: DesktopPaths) => Promise<AppState>;
   saveState: (paths: DesktopPaths, state: AppState) => Promise<void>;
   folderIo: FolderIo;
+  environment: EnvironmentStore;
   spawn: Spawner;
   channel: ControlChannel;
   agent: () => Promise<AgentProcess>;
