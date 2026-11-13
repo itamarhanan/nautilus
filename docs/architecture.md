@@ -105,3 +105,7 @@ A free Studio restarts every four hours. Nautilus treats that as a full recycle.
 6. Report `ready`, or `degraded` when any project is unhealthy.
 
 The phone reconnects on its own, loads a snapshot, and resumes the event stream from the last sequence it saw. An interrupted turn shows as interrupted, never as finished.
+
+## Vercel pivot (in progress)
+
+Nautilus is moving off Lightning AI. The new backend runs on Vercel: a single Next.js app (`apps/web`) serves the PWA and the `/api/cloud/*` routes, Vercel Sandbox runs OpenCode per turn, and Vercel Postgres (Neon) stores per-user/per-project/per-worktree diffs as git bundles. Identity is device-based (pairing codes/QR). The desktop app uploads a base bundle, runs a streamed turn, and pulls the resulting bundle back with the existing three-way merge/conflict machinery. Preview/dev-server features are gated behind `NAUTILUS_PREVIEW_ENABLED`. The Lightning runner, SSH forwards, and control listener are being removed in favor of this model.

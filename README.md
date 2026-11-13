@@ -5,7 +5,9 @@
 
 ![Nautilus: run a coding agent from your phone. Bring the work home to your PC.](./docs/media/banner.png)
 
-Nautilus pairs an installable phone PWA with a free cloud runner. You prompt an agent, watch it work and check a live preview of the result, from a phone, on a train, with your laptop closed. Back at your desk, a desktop app shows you a real diff and merges the agent's work into your project. It never touches your `.git` directory.
+Nautilus pairs an installable phone PWA with a cloud runner. You prompt an agent, watch it work and check a live preview of the result, from a phone, on a train, with your laptop closed. Back at your desk, a desktop app shows you a real diff and merges the agent's work into your project. It never touches your `.git` directory.
+
+> **In progress:** the backend is migrating from Lightning AI to Vercel + Postgres. See `docs/architecture.md` for the pivot details.
 
 The whole thing runs on infrastructure that costs nothing. There is no credit card, no domain, no Docker and no paid VM, and one public HTTPS port carries the app, the API and the preview.
 
