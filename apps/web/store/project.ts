@@ -2,6 +2,7 @@ import * as api from "@/lib/api/endpoints";
 import { errorMessage } from "@/lib/api/client";
 import { writeLocation } from "@/lib/location";
 import { sessionTitle } from "@/lib/project";
+import { previewEnabled } from "@/lib/flags";
 import { runPending } from "./pending";
 import { mergeSessionList, pickSessionId, replaceById } from "./reducers";
 import { locationOf } from "./selectors";
@@ -89,6 +90,7 @@ export function projectActions(set: SetState, get: GetState): ProjectActions {
     },
 
     previewUrl: async () => {
+      if (!previewEnabled()) throw new Error("Preview is disabled");
       const projectId = get().project?.id;
       if (!projectId) throw new Error("Select a project first");
       return api.createPreviewUrl(projectId);

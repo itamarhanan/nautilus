@@ -7,6 +7,7 @@ import { ChatPanel } from "../chat/ChatPanel";
 import { HistoryPanel } from "../history/HistoryPanel";
 import { PreviewPanel } from "../preview/PreviewPanel";
 import { ProjectHeader } from "./ProjectHeader";
+import { previewEnabled } from "@/lib/flags";
 
 export function ProjectPanel({ project }: { project: ProjectRecord }) {
   const view = useWorkspace((state) => state.view);
@@ -33,7 +34,7 @@ export function ProjectPanel({ project }: { project: ProjectRecord }) {
                 />
               }
             />
-          ) : view === "preview" ? (
+          ) : view === "preview" && previewEnabled() ? (
             <PreviewPanel project={project} />
           ) : (
             <HistoryPanel project={project} />
