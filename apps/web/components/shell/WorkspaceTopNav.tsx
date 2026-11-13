@@ -27,15 +27,17 @@ export function WorkspaceTopNav() {
       endContent={
         <>
           <ConnectionBadge />
-          <IconButton
-            label="Connection and device info"
-            tooltip="Info"
-            variant={isInfoOpen ? "secondary" : "ghost"}
-            icon={<Info className="size-4" aria-hidden />}
-            onClick={() => {
-              setInfoOpen(!isInfoOpen);
-            }}
-          />
+          {isMobile ? (
+            <IconButton
+              label="Connection and device info"
+              tooltip="Info"
+              variant={isInfoOpen ? "secondary" : "ghost"}
+              icon={<Info className="size-4" aria-hidden />}
+              onClick={() => {
+                setInfoOpen(!isInfoOpen);
+              }}
+            />
+          ) : null}
         </>
       }
     />
