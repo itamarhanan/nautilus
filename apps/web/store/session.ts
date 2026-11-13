@@ -65,7 +65,11 @@ export function sessionActions(set: SetState, get: GetState): SessionActions {
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ prompt, model: get().model }),
             });
-            if (!res.ok || !res.body) throw new Error(`prompt failed: ${res.status}`);
+            if (!res.ok) {
+              const body = await res.json().catch(() => ({}));
+              throw new Error(body.message ?? body.error ?? `prompt failed: ${res.status}`);
+            }
+            if (!res.body) throw new Error(`prompt failed: ${res.status}`);
             const reader = res.body.getReader();
             const decoder = new TextDecoder();
             let buffer = "";
