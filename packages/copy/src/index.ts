@@ -179,10 +179,10 @@ export const sync = {
 export const review = {
   step: {
     authorizing: "Authorizing this sync on the PC",
-    tunnel: "Opening the reverse SSH tunnel",
+    tunnel: "Opening the link to the runner",
     reviewing: "Comparing both sides",
     applying: "Applying changes",
-    closing: "Closing the tunnel",
+    closing: "Closing the link",
   },
   subtitle: {
     pull: "Agent changes from the runner, merged into your files on this PC",
