@@ -255,7 +255,7 @@ export class OpenCodeProcess implements OpenCodeService {
         const missing = (error as NodeJS.ErrnoException).code === "ENOENT";
         throw new Error(
           missing
-            ? `OpenCode was not found at ${this.binary}; run scripts/install-opencode.sh`
+            ? `OpenCode was not found at ${this.binary}; reinstall the opencode-ai package or set NAUTILUS_OPENCODE_BIN`
             : `OpenCode could not be started from ${this.binary}: ${error.message}`,
         );
       }
