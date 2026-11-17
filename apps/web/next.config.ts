@@ -6,18 +6,12 @@ const buildId = process.env.NAUTILUS_BUILD_ID ?? randomUUID();
 const nextConfig = {
   generateBuildId: () => buildId,
   env: { NAUTILUS_BUILD_ID: buildId },
-  rewrites() {
-    return [
-      {
-        source: "/api/cloud/:path*",
-        destination: "/api/cloud/:path*",
-      },
-      {
-        source: "/api/:path*",
-        destination: "/api/cloud/:path*",
-      },
-    ];
+  // The runner bundle is written into the sandbox by the functions that wake
+  // it, so it has to ship with them.
+  outputFileTracingIncludes: {
+    "/api/**/*": ["./runner-dist/**/*"],
   },
+  serverExternalPackages: ["@vercel/sandbox"],
 } satisfies NextConfig;
 
 export default nextConfig;

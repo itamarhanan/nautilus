@@ -7,6 +7,8 @@ import { useActions, useWorkspace } from "@/store";
 
 const POLL_MS = 15_000;
 const EMPTY_POLL_MS = 10_000;
+// A runner waking up in its sandbox is ready within a minute or so.
+const STARTING_POLL_MS = 3_000;
 
 function isActive(): boolean {
   return document.visibilityState === "visible" && navigator.onLine;
@@ -15,6 +17,7 @@ function isActive(): boolean {
 export function useAppLifecycle() {
   const auth = useWorkspace((state) => state.auth);
   const hasProjects = useWorkspace((state) => state.projects.length > 0);
+  const isStarting = useWorkspace((state) => state.runner.lifecycle?.state === "starting");
   const { bootstrap, refresh, setOnline } = useActions();
 
   useEffect(() => {
@@ -56,10 +59,10 @@ export function useAppLifecycle() {
       () => {
         if (isActive()) void refresh();
       },
-      hasProjects ? POLL_MS : EMPTY_POLL_MS,
+      isStarting ? STARTING_POLL_MS : hasProjects ? POLL_MS : EMPTY_POLL_MS,
     );
     return () => {
       window.clearInterval(timer);
     };
-  }, [auth, hasProjects, refresh]);
+  }, [auth, hasProjects, isStarting, refresh]);
 }
