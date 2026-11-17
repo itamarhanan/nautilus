@@ -19,13 +19,11 @@ import {
 } from "../src/lib/folders";
 import type { RunningProcess, SpawnHandlers, Spawner } from "../src/lib/process";
 import {
-  detectLightningHost,
   readSettings,
   settingsDocument,
   validateSettings,
   type DesktopSettings,
 } from "../src/lib/settings";
-import { controlArgs, resolveHomePath, SshForward, syncArgs } from "../src/lib/ssh";
 import {
   emptyState,
   maxRecentFolders,
@@ -45,13 +43,11 @@ import {
 import { SyncSession } from "../src/lib/sync";
 import { createDesktopStore, type DesktopServices } from "../src/store";
 
+const adminToken = "a".repeat(40);
+
 const settings: DesktopSettings = {
-  runnerUrl: "https://8080-studio.cloudspaces.litng.ai",
-  ssh: {
-    host: "ssh.lightning.ai",
-    user: "s_01abc",
-    keyPath: "~/.ssh/lightning_rsa",
-  },
+  runnerUrl: "https://nautilus.example.vercel.app",
+  adminToken,
   projectRoots: ["~/code"],
 };
 
@@ -128,59 +124,26 @@ describe("settings", () => {
     });
     expect(legacy).toEqual({
       runnerUrl: "https://runner.example",
-      ssh: { host: "ssh.lightning.ai", user: "s_old", keyPath: "~/.ssh/id" },
+      adminToken: "",
       projectRoots: ["~"],
     });
     expect(Object.keys(settingsDocument(legacy)).sort()).toEqual([
+      "adminToken",
+      "gatewayUrl",
       "projectRoots",
-      "runnerUrl",
-      "ssh",
     ]);
+    expect(readSettings(settingsDocument(settings))).toEqual(settings);
   });
 
   it("reports each invalid field", () => {
     const errors = validateSettings({
       runnerUrl: "http://runner.example/path",
-      ssh: { host: "bad host", user: "", keyPath: "relative/key" },
+      adminToken: "short",
       projectRoots: ["code"],
     });
-    expect(Object.keys(errors).sort()).toEqual([
-      "keyPath",
-      "projectRoots",
-      "runnerUrl",
-      "sshHost",
-      "sshUser",
-    ]);
+    expect(Object.keys(errors).sort()).toEqual(["adminToken", "projectRoots", "runnerUrl"]);
     expect(validateSettings(settings)).toEqual({});
-
-    expect(
-      validateSettings(
-        {
-          ...settings,
-          runnerUrl: "",
-          ssh: { host: "", user: "", keyPath: "" },
-        },
-        true,
-      ),
-    ).toEqual({});
-  });
-
-  it("finds the host block written by lightning ssh configure", () => {
-    const config = [
-      "Host github.com",
-      "  HostName github.com",
-      "  User git",
-      "",
-      "Host nautilus",
-      "      User s_01m3bh0wj9rf3peqy978kv25d2",
-      "      Hostname ssh.lightning.ai",
-      "      IdentityFile ~/.ssh/lightning_rsa",
-    ].join("\n");
-    expect(detectLightningHost(config)).toEqual({
-      host: "ssh.lightning.ai",
-      user: "s_01m3bh0wj9rf3peqy978kv25d2",
-    });
-    expect(detectLightningHost("Host x\n  HostName example.com\n  User s_1")).toBeUndefined();
+    expect(validateSettings({ ...settings, runnerUrl: "http://127.0.0.1:4002" })).toEqual({});
   });
 });
 
@@ -325,7 +288,7 @@ describe("project folders", () => {
   });
 });
 
-describe("ssh forwards", () => {
+describe("desktop capability", () => {
   const capability = JSON.parse(
     readFileSync(
       fileURLToPath(new URL("../src-tauri/capabilities/default.json", import.meta.url)),
@@ -341,28 +304,31 @@ describe("ssh forwards", () => {
             cmd?: string;
             sidecar?: boolean;
             args?: unknown[];
+            url?: string;
           }>;
         }
     >;
   };
-  const spawnScope = capability.permissions.find(
-    (
-      permission,
-    ): permission is {
-      identifier: string;
-      allow: Array<{
-        name?: string;
-        cmd?: string;
-        sidecar?: boolean;
-        args?: unknown[];
-      }>;
-    } => typeof permission === "object" && permission.identifier === "shell:allow-spawn",
-  );
+  const scope = (identifier: string) =>
+    capability.permissions.find(
+      (
+        permission,
+      ): permission is {
+        identifier: string;
+        allow: Array<{
+          name?: string;
+          cmd?: string;
+          sidecar?: boolean;
+          args?: unknown[];
+          url?: string;
+        }>;
+      } => typeof permission === "object" && permission.identifier === identifier,
+    );
 
   function allowedBy(name: string, args: string[]): boolean {
-    const scope = spawnScope?.allow.find((entry) => entry.name === name)?.args;
-    if (!scope || scope.length !== args.length) return false;
-    return scope.every((rule, index) => {
+    const rules = scope("shell:allow-spawn")?.allow.find((entry) => entry.name === name)?.args;
+    if (!rules || rules.length !== args.length) return false;
+    return rules.every((rule, index) => {
       const value = args[index] ?? "";
       return typeof rule === "string"
         ? rule === value
@@ -370,92 +336,34 @@ describe("ssh forwards", () => {
     });
   }
 
-  const key = resolveHomePath(settings.ssh.keyPath, "/home/me");
-
-  it("builds a local-only control forward the capability allows", () => {
-    const args = controlArgs(settings, key, 47123);
-    expect(args).toContain("-L");
-    expect(args).not.toContain("-R");
-    expect(args).toContain("127.0.0.1:47123:127.0.0.1:4001");
-    expect(args).toContain("StrictHostKeyChecking=accept-new");
-    expect(allowedBy("nautilus-ssh-control", args)).toBe(true);
-
-    expect(
-      allowedBy(
-        "nautilus-ssh-control",
-        args.map((arg) => arg.replace(":4001", ":22")),
-      ),
-    ).toBe(false);
-  });
-
-  it("builds a reverse-only sync forward the capability allows", () => {
-    const args = syncArgs(settings, key);
-    expect(args).toContain("-R");
-    expect(args).not.toContain("-L");
-    expect(args).toContain("127.0.0.1:4200:127.0.0.1:4100");
-    expect(allowedBy("nautilus-ssh-sync", args)).toBe(true);
-    expect(allowedBy("nautilus-ssh-control", args)).toBe(false);
-  });
-
   it("allows the agent only as the shipped sidecar with a stdin key", () => {
     expect(allowedBy("binaries/nautilus-sync-agent", ["--launch-key-stdin"])).toBe(true);
     expect(allowedBy("binaries/nautilus-sync-agent", ["-e", "--launch-key-stdin"])).toBe(false);
     expect(allowedBy("binaries/nautilus-sync-agent", [])).toBe(false);
-    const entry = spawnScope?.allow.find((scope) => scope.name === "binaries/nautilus-sync-agent");
-    expect(entry?.sidecar).toBe(true);
-    expect(spawnScope?.allow.some((scope) => scope.cmd === "node")).toBe(false);
+    const spawnable = scope("shell:allow-spawn")?.allow ?? [];
+    expect(spawnable).toHaveLength(1);
+    expect(spawnable[0]?.sidecar).toBe(true);
   });
 
-  it("rejects unsafe SSH targets and key paths", () => {
-    expect(() =>
-      controlArgs(
-        { ...settings, ssh: { ...settings.ssh, user: "s_1 -oProxyCommand=x" } },
-        key,
-        47000,
-      ),
-    ).toThrow();
-    expect(() => resolveHomePath("relative/key", "/home/me")).toThrow();
-    expect(resolveHomePath("~/.ssh/k", "/home/me")).toBe("/home/me/.ssh/k");
-  });
-
-  it("connects once ready and reports ssh's reason when it exits first", async () => {
-    const good = fakeSpawner();
-    const forward = new SshForward("nautilus-ssh-sync", ["args"], good.spawn);
-    await forward.start(() => Promise.resolve(true));
-    expect(forward.state).toBe("connected");
-    await forward.stop();
-    expect(good.children[0]?.killed).toBe(true);
-
-    const failing = fakeSpawner((child) => {
-      child.handlers.onStderr?.("s_01abc@ssh.lightning.ai: Permission denied (publickey).");
-      child.handlers.onClose(255);
-    });
-    const broken = new SshForward("nautilus-ssh-sync", ["args"], failing.spawn);
-    await expect(broken.start(() => Promise.resolve(false), 2_000)).rejects.toThrow(
-      /Permission denied/,
-    );
-    expect(friendlyError(new Error("ssh exited: Permission denied (publickey)")).message).toMatch(
-      /rejected the SSH key/,
-    );
+  it("talks HTTP only to loopback and to https deployments", () => {
+    expect(
+      scope("http:default")
+        ?.allow.map((entry) => entry.url)
+        .sort(),
+    ).toEqual(["http://127.0.0.1:*", "https://*"]);
   });
 });
 
 describe("control channel", () => {
-  it("connects through the SSH forward and reconnects after it drops", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi
-        .fn()
-        .mockImplementation(() =>
-          Promise.resolve(jsonResponse({ service: "nautilus-server", version: "1.2.3" })),
-        ),
-    );
+  it("connects to the gateway with the admin token and reconnects after it drops", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(() =>
+        Promise.resolve(jsonResponse({ service: "nautilus-server", version: "1.2.3" })),
+      );
+    vi.stubGlobal("fetch", fetchMock);
     const timers: Array<() => void> = [];
-    const { spawn, children } = fakeSpawner();
     const channel = new ControlChannel({
-      spawn,
-      home: "/home/me",
-      localMode: false,
       setTimer: (callback) => {
         timers.push(callback);
         return timers.length;
@@ -467,40 +375,35 @@ describe("control channel", () => {
     await channel.connect(settings);
     expect(channel.current.phase).toBe("connected");
     expect(channel.current.info?.version).toBe("1.2.3");
-    expect(children[0]?.program).toBe("nautilus-ssh-control");
-    const [url, init] = firstCall(vi.mocked(fetch));
-    expect(url).toMatch(/^http:\/\/127\.0\.0\.1:47\d{3}\/api\/control\/info$/);
-    expect(new Headers(init?.headers).get("x-nautilus-control")).toBe("1");
-    expect(new Headers(init?.headers).get("authorization")).toBeNull();
+    const [url, init] = firstCall(fetchMock);
+    expect(url).toBe("https://nautilus.example.vercel.app/api/control/info");
+    expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${adminToken}`);
 
-    children[0]?.handlers.onClose(255);
+    fetchMock.mockImplementationOnce(() => Promise.reject(new Error("offline")));
+    await channel.refreshInfo();
     expect(channel.current.phase).toBe("reconnecting");
     expect(timers).toHaveLength(1);
     timers[0]?.();
     await vi.waitFor(() => {
       expect(channel.current.phase).toBe("connected");
     });
-    expect(children).toHaveLength(2);
     await channel.disconnect();
     expect(phases).toContain("connecting");
   });
 
   it("fails without retrying when validating new settings", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("connection refused")));
-    const { spawn } = fakeSpawner((child) => {
-      child.handlers.onStderr?.("ssh: Could not resolve hostname ssh.lightning.ai");
-      child.handlers.onClose(255);
-    });
-    const channel = new ControlChannel({
-      spawn,
-      home: "/home/me",
-      localMode: false,
-      setTimer: () => 0,
-    });
-    await expect(channel.connect(settings, { retry: false })).rejects.toThrow(
-      /could not be resolved/,
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(
+          jsonResponse({ error: "unauthorized", message: "Invalid credentials" }, 401),
+        ),
     );
+    const channel = new ControlChannel({ setTimer: () => 0 });
+    await expect(channel.connect(settings, { retry: false })).rejects.toThrow(/admin token/);
     expect(channel.current.phase).toBe("offline");
+    expect(friendlyError(new ApiError("runner_starting", "x", 503)).message).toMatch(/starting/);
   });
 });
 
@@ -578,13 +481,10 @@ describe("sync agent process", () => {
     const production = await runnerKey(settings, false);
     expect(production).toMatch(/^runner-[0-9a-f]{16}$/);
     expect(
-      await runnerKey(
-        { ...settings, runnerUrl: "HTTPS://8080-studio.cloudspaces.litng.ai/" },
-        false,
-      ),
+      await runnerKey({ ...settings, runnerUrl: "HTTPS://nautilus.example.vercel.app/" }, false),
     ).toBe(production);
     expect(
-      await runnerKey({ ...settings, runnerUrl: "https://8080-other.cloudspaces.litng.ai" }, false),
+      await runnerKey({ ...settings, runnerUrl: "https://other.example.vercel.app" }, false),
     ).not.toBe(production);
 
     const { spawn, children } = fakeSpawner((child) => {
@@ -620,7 +520,7 @@ describe("control API", () => {
       conflicts: [{ path: "src/app.ts", reason: "content_conflict" }],
     };
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(conflict, 409)));
-    const api = new ControlApi("http://127.0.0.1:47001");
+    const api = new ControlApi("http://127.0.0.1:47001", adminToken);
     const error = await api
       .sync("demo", "push", { grant: "g.s" })
       .catch((caught: unknown) => caught);
@@ -629,12 +529,12 @@ describe("control API", () => {
     expect((error as ApiError).conflicts).toEqual(conflict.conflicts);
   });
 
-  it("sends the grant and never a bearer token", async () => {
+  it("sends the grant and the admin token", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValue(jsonResponse({ version: 1, requestId: "r", status: "ok" }));
     vi.stubGlobal("fetch", fetchMock);
-    await new ControlApi("http://127.0.0.1:47001").sync("demo", "pull", {
+    await new ControlApi("http://127.0.0.1:47001", adminToken).sync("demo", "pull", {
       grant: "payload.sig",
       requestId: "req-12345678",
     });
@@ -645,7 +545,7 @@ describe("control API", () => {
       grant: "payload.sig",
       requestId: "req-12345678",
     });
-    expect(new Headers(init?.headers).get("authorization")).toBeNull();
+    expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${adminToken}`);
   });
 
   it("gives up on a delete the runner never answers, and says the project was kept", async () => {
@@ -662,7 +562,7 @@ describe("control API", () => {
             }),
         ),
       );
-      const outcome = new ControlApi("http://127.0.0.1:47001")
+      const outcome = new ControlApi("http://127.0.0.1:47001", adminToken)
         .deleteProject("demo")
         .catch((caught: unknown) => caught);
       await vi.advanceTimersByTimeAsync(60_000);
@@ -679,7 +579,7 @@ describe("control API", () => {
   it("accepts an empty 204 from a delete", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 204 })));
     await expect(
-      new ControlApi("http://127.0.0.1:47001").deleteProject("demo"),
+      new ControlApi("http://127.0.0.1:47001", adminToken).deleteProject("demo"),
     ).resolves.toBeUndefined();
   });
 
@@ -702,7 +602,14 @@ describe("sync session", () => {
         claims: { grantId: "grant-1" },
       }),
       revokeGrant: vi.fn().mockResolvedValue(undefined),
-      tunnelHealth: vi.fn().mockResolvedValue(true),
+      startRelay: vi.fn().mockResolvedValue(undefined),
+      stopRelay: vi.fn().mockResolvedValue(undefined),
+      relay: vi.fn().mockResolvedValue({
+        url: "https://sb.vercel.run",
+        token: "1.sig",
+        expiresAt: "2030-01-01T00:00:00.000Z",
+      }),
+      tunnelHealth: vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true),
       syncPreview:
         preview instanceof Error
           ? vi.fn().mockRejectedValue(preview)
@@ -712,8 +619,11 @@ describe("sync session", () => {
     const agent = {
       mintGrant: mocks.mintGrant,
       revokeGrant: mocks.revokeGrant,
+      startRelay: mocks.startRelay,
+      stopRelay: mocks.stopRelay,
     } as unknown as AgentApi;
     const control = {
+      relay: mocks.relay,
       tunnelHealth: mocks.tunnelHealth,
       syncPreview: mocks.syncPreview,
       sync: mocks.sync,
@@ -721,25 +631,23 @@ describe("sync session", () => {
     return { agent, control, mocks };
   }
 
-  it("opens the reverse tunnel, forwards the grant, and cleans up", async () => {
+  it("opens the relay, forwards the grant, and cleans up", async () => {
     const { agent, control, mocks } = fakes({
       version: 1,
       requestId: "preview-1",
       status: "ok",
     });
-    const { spawn, children } = fakeSpawner();
     const session = new SyncSession({
       projectId: "demo",
       direction: "pull",
       control,
       agent,
-      settings,
-      home: "/home/me",
-      spawn,
-      localMode: false,
     });
     await session.preview();
-    expect(children[0]?.program).toBe("nautilus-ssh-sync");
+    expect(mocks.startRelay).toHaveBeenCalledWith(
+      expect.objectContaining({ url: "https://sb.vercel.run", token: "1.sig" }),
+    );
+    expect(mocks.tunnelHealth).toHaveBeenCalledTimes(2);
     expect(mocks.syncPreview).toHaveBeenCalledWith(
       "demo",
       "pull",
@@ -753,7 +661,7 @@ describe("sync session", () => {
     );
     await session.close();
     expect(mocks.revokeGrant).toHaveBeenCalledWith("grant-1");
-    expect(children[0]?.killed).toBe(true);
+    expect(mocks.stopRelay).toHaveBeenCalled();
   });
 
   it("treats a 409 conflict as a result and still revokes on failure", async () => {
@@ -767,10 +675,6 @@ describe("sync session", () => {
     const local = {
       projectId: "demo",
       direction: "push" as const,
-      settings,
-      home: "/home/me",
-      spawn: fakeSpawner().spawn,
-      localMode: true,
     };
     const session = new SyncSession({
       ...local,
@@ -863,6 +767,12 @@ describe("desktop store", () => {
       }),
       syncHistory: vi.fn().mockResolvedValue([]),
       rewindSyncBase: vi.fn().mockResolvedValue(undefined),
+      relay: vi.fn().mockResolvedValue({
+        url: "https://sb.vercel.run",
+        token: "1.sig",
+        expiresAt: "2030-01-01T00:00:00.000Z",
+      }),
+      tunnelHealth: vi.fn().mockResolvedValue(true),
       syncPreview: vi.fn(),
       sync: vi.fn(),
       pairingCode: vi.fn().mockResolvedValue({
@@ -940,6 +850,8 @@ describe("desktop store", () => {
         claims: { grantId: "grant-1" },
       }),
       revokeGrant: vi.fn().mockResolvedValue(undefined),
+      startRelay: vi.fn().mockResolvedValue(undefined),
+      stopRelay: vi.fn().mockResolvedValue(undefined),
       undoPull: vi.fn().mockResolvedValue({
         projectId: "shop",
         neverSynced: false,
@@ -959,7 +871,6 @@ describe("desktop store", () => {
           home: "/home/me",
           config: "c",
           state: "s",
-          sshConfig: "k",
         }),
       loadSettings: () => Promise.resolve({ settings, exists: true }),
       saveSettings: saveSettingsMock,
@@ -1635,7 +1546,9 @@ describe("desktop store", () => {
     await vi.waitFor(() => {
       expect(store.getState().pairing?.code).toBe("ABCD2345");
     });
-    expect(store.getState().pairing?.url).toBe("http://127.0.0.1:4002/?pair=ABCD2345");
+    expect(store.getState().pairing?.url).toBe(
+      "https://nautilus.example.vercel.app/?pair=ABCD2345",
+    );
   });
 
   it("restarts the agent for a new runner and closes the open review", async () => {
@@ -1683,7 +1596,7 @@ describe("desktop store", () => {
     const store = createDesktopStore(value);
     await store.getState().init();
     channel.connect.mockRejectedValueOnce(new Error("Permission denied"));
-    const next = { ...settings, ssh: { ...settings.ssh, user: "s_other" } };
+    const next = { ...settings, adminToken: "b".repeat(40) };
     expect(await store.getState().saveSettings(next)).toBe("connection_failed");
     expect(saveSettingsMock).not.toHaveBeenCalled();
     const invalid = await store.getState().saveSettings({ ...next, projectRoots: ["relative"] });
