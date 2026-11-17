@@ -63,7 +63,7 @@ The runner's environment:
 | `NAUTILUS_PORT`               | Listen port, default 4000.                                                                                        |
 | `NAUTILUS_OPENCODE_AUTH_JSON` | Optional. When set, written to OpenCode's `auth.json` at boot, replacing `opencode auth login`.                   |
 
-The API paths and bodies are the ones in `packages/types`, unchanged from the Lightning runner, except that device, pairing and sign-out routes now live in the gateway.
+The API paths and bodies are the ones in `packages/types`, unchanged from the v0.2.0 runner, except that device, pairing and sign-out routes now live in the gateway.
 
 ## Gateway routes
 

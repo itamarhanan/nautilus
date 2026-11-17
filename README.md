@@ -5,26 +5,18 @@
 
 ![Nautilus: run a coding agent from your phone. Bring the work home to your PC.](./docs/media/banner.png)
 
-Nautilus pairs an installable phone PWA with a cloud runner. You prompt an agent, watch it work and check a live preview of the result, from a phone, on a train, with your laptop closed. Back at your desk, a desktop app shows you a real diff and merges the agent's work into your project. It never touches your `.git` directory.
+Nautilus pairs an installable phone PWA with a coding agent in the cloud. You prompt the agent and watch it work from a phone, on a train, with your laptop closed. Back at your desk, a desktop app shows you a real diff and merges the agent's work into your project. It never touches your `.git` directory.
 
-> **In progress:** the backend is migrating from Lightning AI to Vercel + Postgres. See `docs/architecture.md` for the pivot details.
-
-The whole thing runs on infrastructure that costs nothing. There is no credit card, no domain, no Docker and no paid VM, and one public HTTPS port carries the app, the API and the preview.
+It runs on Vercel's free Hobby plan and Neon's free Postgres tier. There is no credit card, no domain, no Docker and no paid VM.
 
 ## Quick start
 
-1. **Install the desktop app** from the [latest release](https://github.com/itamarhanan/nautilus/releases/latest). See [the table below](#install-the-desktop-app) for which file to pick.
-2. **Set up a runner** on a free [Lightning AI](https://lightning.ai) Studio. You need `git`, `curl`, `ssh` and Python 3 on the PC:
+1. **Deploy the web app** to Vercel, with Neon Postgres attached. See [Deploying](#deploying) for the two secrets to set.
+2. **Install the desktop app** from the [latest release](https://github.com/itamarhanan/nautilus/releases/latest). See [the table below](#install-the-desktop-app) for which file to pick.
+3. **Connect the desktop.** Open **Settings › Runner**, paste your deployment's URL and admin token, and press **Save and connect**.
+4. **Link your phone.** Press **Link phone** in the desktop app, scan the QR code and add the app to the home screen.
 
-   ```bash
-   curl -fsSL https://raw.githubusercontent.com/itamarhanan/nautilus/main/scripts/install.sh | bash
-   ```
-
-   It asks for your Lightning teamspace, deploys the runner and ends with a QR code. The free OpenCode Zen models work right away, and it prints how to sign in another provider.
-
-3. **Scan the QR code** with your phone and add the app to the home screen. Then, in the desktop app, open **Settings › Runner**, paste the public URL the installer printed, press **Detect**, then **Save and connect**.
-
-To try it on one machine first, see [everything on one machine](#option-b-everything-on-one-machine).
+The first request wakes the runner, which takes about fifteen seconds. To try everything on one machine first, see [local development](#local-development).
 
 ## The idea
 
@@ -35,38 +27,42 @@ A phone is a good place to _ask_ for work and a bad place to _review_ it. So Nau
 | Pick a project and send a prompt               | Keep the real project and its Git history           |
 | Stream the agent's turn as it happens          | See a real content diff before anything changes     |
 | Approve or deny the commands it asks to run    | Pull, push, or choose a side per conflicting file   |
-| Watch a live preview with HMR                  | Compare both versions of a conflict, open an editor |
-| See each turn's changed files, and undo a turn | Undo the last pull                                  |
-| Lock the screen and get told when it's done    | Get a notification when the runner has new work     |
+| See each turn's changed files, and undo a turn | Compare both versions of a conflict, open an editor |
+| Lock the screen and get told when it's done    | Undo the last pull                                  |
 
-The PC does **not** need to be online while the agent works. It only has to be reachable when you ask it to sync.
+The PC does **not** need to be online while the agent works. It only has to be online when you sync.
 
 On the phone you can also pick the model and, for models that have them, the reasoning effort. A meter shows how full the context is, and every reply shows its tokens and cost.
+
+Live previews of a project's dev server are turned off in this release. A sandbox that sleeps can't keep a dev server up, and a preview that half works is worse than none.
 
 ## How it holds up
 
 Most of the engineering here is about what happens when things go wrong. The details are in [docs/architecture.md](./docs/architecture.md) and [docs/sync-protocol.md](./docs/sync-protocol.md). Here are the parts worth reading first.
 
 ```
-   phone (PWA)                        free cloud runner                     your PC
-  ┌────────────┐                ┌───────────────────────────┐          ┌──────────────┐
-  │  chat      │  HTTPS :8080   │  gateway ─┬─ PWA   :4002  │          │  Tauri app   │
-  │  preview   │◄──────────────►│           ├─ API   :4000  │          │      ▲       │
-  │  history   │   (one origin) │           ├─ ctrl  :4001 ◄┼──────────┤  local fwd   │
-  └────────────┘                │           └─ prev  :8081  │  SSH     │      │       │
-                                │             opencode 4096 │          │  ┌───────────┤
-                                │             dev srv  31xx │          │  │ sync-agent│
-                                │            shadow git repo│◄─────────┼──┤ 127.0.0.1 │
-                                └───────────────────────────┘  rev SSH │  │ :4100     │
-                                                                    └──┴──┴───────────┘
+   phone (PWA)              Vercel                                   your PC
+  ┌────────────┐  cookie  ┌──────────────────────────┐  admin   ┌──────────────┐
+  │  chat      │─────────►│  web app (functions)     │◄─────────┤  Tauri app   │
+  │  history   │          │  Postgres: phones, codes │  token   │              │
+  └────────────┘          └────────────┬─────────────┘          │              │
+                                       │ runner key             │              │
+                                       ▼                        │              │
+                          ┌──────────────────────────┐          │  ┌───────────┤
+                          │  Vercel Sandbox: runner  │   relay  │  │ sync-agent│
+                          │  OpenCode, projects,     │◄─────────┼──┤ 127.0.0.1 │
+                          │  shadow git repos        │ (polls)  │  │ :4100     │
+                          └──────────────────────────┘          └──┴───────────┘
 ```
 
-### The provider recycles the machine every four hours
+There are three places code runs. The **web app** on Vercel serves the PWA, keeps phones and pairing codes in Postgres and forwards every other API call to the runner. The **runner** lives in one persistent Vercel Sandbox and runs the agent, the projects and the runner's side of sync. The web app wakes it on demand. The **PC** runs the desktop app and its sync agent.
 
-A free Lightning Studio restarts on a timer. Nautilus treats that as a full recycle, not a hiccup.
+### The runner restarts all the time
 
-- `node_modules` does not come back, so `.lightning_studio/on_start.sh` reinstalls Node and every dependency on every boot. The script takes an `flock`, so a double boot cannot race. It will not kill a PID whose `/proc/<pid>/cwd` is not the repo, so a recycled PID is never mistaken for one of ours.
-- A file written just before a restart can come back older, or truncated. So on boot the runner checks each project's shadow repository and compares the folder with its last checkpoint. A project that fails is marked `unhealthy` and is not started, served or synced. Serving a restored tree as if it were current would be worse than refusing.
+A sandbox session on the Hobby plan lasts at most 45 minutes. The filesystem survives, the processes do not, and a file written just before the stop can come back older or cut short. Nautilus treats every start as a full recycle, not a hiccup.
+
+- The web app starts the runner when a request needs it. A lease in Postgres makes sure two requests never start it twice. The phone shows the runner starting and checks again every few seconds.
+- On start the runner rolls back any sync that did not commit, then checks each project's shadow repository and compares the folder with its last checkpoint. A project that fails is marked `unhealthy` and is not served or synced. Serving a restored tree as if it were current would be worse than refusing.
 - A turn that was running is never reported as finished. It becomes `interrupted`, and the phone offers a retry.
 
 ### Your Git is not the agent's memory
@@ -79,47 +75,43 @@ The agent's work needs history, checkpoints, three-way merges and undo. Your own
 - **What Git cannot round-trip is refused.** Symlinks, submodules, `.gitmodules`, Git LFS pointers and oversized files fail with a clear error. Dependencies, caches and secret files stay out: `.env*`, `.envrc`, `.dev.vars`, keys and certificates (`*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa*` and the like). A file that was synced before it counted as secret is never deleted from either side. A nested checkout stays out too, and the desktop tells you once.
 - **Every agent turn is a checkpoint.** The phone lists the files each turn changed and can undo one turn while keeping the ones after it, the way `git revert` does. An undo is a checkpoint too, so it can be undone.
 
-### The PC holds no Nautilus credential
+### The PC never accepts a connection
 
-The only secret on the laptop is the Lightning SSH key, and Lightning issues and revokes it. Nautilus itself stores no token, password or API key on the PC, so there is nothing of its own to steal and nothing to rotate.
+The sandbox cannot reach your PC, and your PC does not listen on the internet. So the PC reaches out.
 
-- **The PC dials out.** A local SSH forward reaches the runner's control API while the app runs. A reverse forward exposes the PC's sync agent only during a sync. There is no public SSH daemon and no inbound port on your machine.
-- **The capability file is the desktop's security boundary.** The app can start exactly three programs, each with argument validators: `ssh` with a loopback-only local forward, `ssh` with one fixed reverse forward, and the sync agent binary that ships inside the app. The agent is a Node single executable, so the PC needs no Node install. The app reads only `~/.nautilus/**`, `~/.ssh/config` and `package.json` files, and makes HTTP requests only to `127.0.0.1`.
-- **The PC mints the grants.** For each pull or push the agent signs a grant for one project and one direction, capped at 10 minutes whatever the UI asks for. The runner forwards it and cannot make one. A push grant cannot call `apply`, so a push never writes to the PC.
+- **The sync agent opens the link.** During a sync you started, the PC's sync agent long-polls the runner over HTTPS, runs each request it gets against itself, and posts back the answer. The link needs a 15-minute token from the web app and closes when the sync ends. Bundles go straight to the sandbox, so they skip the web app's size and time limits.
+- **The capability file is the desktop's security boundary.** The app can start exactly one program, the sync agent that ships inside it. The agent is a Node single executable, so the PC needs no Node install. The app reads only `~/.nautilus/**` and `package.json` files, and makes HTTP requests only to `127.0.0.1` and to HTTPS.
+- **The PC mints the grants.** For each pull or push the agent signs a grant for one project and one direction, capped at 10 minutes whatever the UI asks for. The runner passes it along and cannot make one. A push grant cannot call `apply`, so a push never writes to the PC.
 - **The launch key dies with the app.** The agent reads a 32-byte key from stdin and exits when the desktop closes that pipe. Restart the app and every earlier grant stops working.
+- **One token on the PC.** The desktop keeps the admin token in `~/.nautilus/config.json`, mode 0600. Change `NAUTILUS_ADMIN_TOKEN` on Vercel to revoke it.
 - **Little Rust.** `main.rs` registers plugins and owns what a web page cannot: the tray icon, hiding to the tray on close and keeping one instance. All sync policy lives in the capability manifest and TypeScript.
 
-### Preview values never travel with the code
+### The sandbox is public, the runner is not
 
-A preview needs the variables your dev command reads from `.env`, but sync leaves those files on the PC. So each project has an **Environment variables** section in the desktop, much like Vercel's. It lists the keys in your local env files, and you pick the ones the preview gets, changing a value just for the preview where needed. Use preview-only credentials, such as a dev database or test-mode keys: a running dev server holds its values in memory, so whoever takes over the box can read them.
+A sandbox's port has a public HTTPS address, so the runner checks every request.
 
-- **The PC owns the values.** The desktop keeps them in the OS keychain and sends them when you save and when you push. Saved values can be replaced, never shown again.
-- **The runner stores them outside the project.** They live in `~/nautilus/secrets/projects/<id>.json`, mode 0600, so a restart needs no desktop. No route returns them; reads list key names only.
-- **Only the dev server gets them.** It starts from a minimal environment plus the project's values, so it never inherits the runner's own secrets or model-provider keys. Changing the values restarts a running preview, and the preview shows a page that reloads itself until the new dev server answers.
-- **The agent gets key names only.** OpenCode runs in a bubblewrap sandbox where the secrets folder is empty and the dev server's process is not there to inspect. Any value of four characters or more that still shows up in its output is replaced with `[redacted:KEY]` before it is stored or reaches the phone.
+- The runner answers only requests that carry the runner key, which only the web app knows, and it trusts the web app's word on who is calling only alongside that key. The key is derived from `NAUTILUS_AUTH_SECRET`, so there is nothing extra to set.
+- A phone links once with a single-use pairing code. Postgres stores only its hash, redeeming one is rate limited per IP, and the desktop can revoke a phone at once. The session cookie is a signed token, so a forged one never reaches Postgres or the runner.
+- Every cookie write to `/api/*` needs an `Origin` that matches the site and an `X-Nautilus-Request: 1` header, which a cross-site form cannot set.
+- Admin routes return 404 to a phone, so it cannot confirm they exist. Every secret comparison is timing-safe.
 
-### The edge proxy is hostile
+### Keys never reach the agent
 
-The Lightning port proxy rewrites every cookie to `SameSite=None` and adds `access-control-allow-origin: *` to every response. The app's own cookie policy buys nothing, and any site can send requests that carry the session cookie. So:
-
-- Every write to `/api/*` needs an `Origin` that matches the public origin and an `X-Nautilus-Request: 1` header, which a cross-site form cannot set.
-- The gateway strips the proxy's permissive CORS headers.
-- Admin routes return 404 on the public listener, so a scanner cannot confirm they exist. They live only on the loopback control listener, which also requires a loopback `Host`, to defeat DNS rebinding, and an `X-Nautilus-Control: 1` header.
-- Preview links redeem only on `POST`. A link-preview crawler that fetches a shared URL with `GET` gets a page with a button and cannot use up the one-time token.
-- Sign-in, pairing, prompts and project control are rate limited, and every secret comparison uses `timingSafeEqual`.
+OpenCode runs inside bubblewrap when the sandbox allows it, where the runner's secrets folder is empty. The runner key and the model provider's credentials are removed from its environment. If a stored preview value still shows up in its output, the runner replaces it with `[redacted:KEY]` before it is stored or reaches the phone.
 
 ### The phone loses its connection, often
 
-Prompts are `POST`, which rules out `EventSource`. The PWA uses a streaming `fetch` with its own SSE parser, and the server sends a heartbeat every 25 seconds. Every event has a sequence number. A reconnecting phone loads a snapshot and resumes from the last sequence it saw. In testing, about one in ten WebSocket handshakes through the proxy was reset, so the client reconnects on its own.
+Prompts are `POST`, which rules out `EventSource`. The PWA uses a streaming `fetch` with its own SSE parser, and the server sends a heartbeat every 25 seconds. Every event has a sequence number. A reconnecting phone loads a snapshot and resumes from the last sequence it saw. A Vercel function stops after five minutes, so the web app ends each stream a little before that and the phone picks up where it left off.
 
 ## Repository layout
 
 ```
 apps/
-  server/       @nautilus/server      the runner: gateway, API, registry, OpenCode bridge,
-                                       sync coordinator, restart recovery
-  web/          @nautilus/web         the phone PWA (Next.js App Router, Tailwind, Astryx)
-  desktop/      @nautilus/desktop     the Tauri app: tunnels, phone linking, diff review, tray
+  web/          @nautilus/web         the phone PWA and the gateway: sign-in, Postgres, waking
+                                       the sandbox and forwarding to the runner (Next.js)
+  runner/       @nautilus/runner      the runner: API, registry, OpenCode bridge, sync
+                                       coordinator, sync relay, restart recovery
+  desktop/      @nautilus/desktop     the Tauri app: phone linking, diff review, tray
   sync-agent/   @nautilus/sync-agent  the PC's loopback agent that answers sync requests
 packages/
   shadow-git/   @nautilus/shadow-git  the shadow repository and durable-file helpers
@@ -127,25 +119,9 @@ packages/
   copy/         @nautilus/copy        the words a person reads, keyed by the state they describe
   brand/        @nautilus/brand       logo, colors and icon generation
 docs/
-  architecture.md   processes, ports, trust boundaries, where state lives, restarts
+  architecture.md   the gateway, the sandbox, the relay, trust boundaries, restarts
   sync-protocol.md  shadow repositories, pull, push, checkpoints, undo, recovery
 ```
-
-The gateway is the only thing that should ever be public.
-
-|      Port | Process     | Purpose                                                                                                |
-| --------: | ----------- | ------------------------------------------------------------------------------------------------------ |
-|      8080 | gateway     | **The only public listener.** `/api/*` to the API, `/preview/*` to the dev server, the rest to the PWA |
-|      8081 | gateway     | Preview origin, so a previewed app needs no base path                                                  |
-|      4000 | server      | The API (loopback)                                                                                     |
-|      4001 | server      | The control API (loopback only, never routed by the gateway)                                           |
-|      4002 | web         | The PWA (loopback)                                                                                     |
-|      4096 | OpenCode    | The agent, with its own data directory (loopback)                                                      |
-| 3100-3199 | per project | The project's own dev server                                                                           |
-|      4100 | sync agent  | The PC's loopback agent, started by the desktop app                                                    |
-|      4200 | (forward)   | The port on the runner that the reverse forward connects to the PC's agent                             |
-
-A project's dev server never takes one of these ports and never fails on a taken one. Each Node process of it loads `apps/server/dev-port-shim.mjs`, which moves a listen on a runner port, or on one something else holds, to a free port. That covers `next dev -p 4096` and a copy of nautilus hosted by nautilus. The runner previews the dev server wherever it ends up listening. A dev server outside Node that hits a taken port still stops, with `dev_port_in_use:<port>`.
 
 ## Install the desktop app
 
@@ -158,165 +134,54 @@ Download the installer for your system from the [latest release](https://github.
 | macOS (Apple Silicon)     | `Nautilus_<version>_aarch64.dmg`            | Open it and drag Nautilus to Applications                 |
 | Windows                   | `Nautilus_<version>_x64-setup.exe`          | Run it                                                    |
 
-The builds are not signed. macOS says the app "cannot be opened"; right-click it in Applications, choose **Open**, then **Open** again. Windows SmartScreen may warn about an unknown publisher; choose **More info**, then **Run anyway**. Linux needs `openssh-client`, which the `.deb` installs for you.
+The builds are not signed. macOS says the app "cannot be opened"; right-click it in Applications, choose **Open**, then **Open** again. Windows SmartScreen may warn about an unknown publisher; choose **More info**, then **Run anyway**.
 
-Then set up a runner, below, and connect the app to it in **Settings › Runner**.
+Then connect the app to your deployment in **Settings › Runner**.
 
-## Self-hosting
+## Deploying
 
-The runner is a Node process behind an HTTP proxy, so anywhere that gives you one public HTTPS port and an SSH endpoint works. A free Lightning AI CPU Studio is the tested path and what the scripts target.
+1. **Create a Vercel project** from this repository with **Root Directory** set to `apps/web`. The build bundles the runner into the web app, so the functions can write it into the sandbox.
+2. **Attach Neon Postgres** from the Vercel marketplace. It sets `DATABASE_URL`. The web app creates its tables on first use.
+3. **Set the secrets.** Generate each with `openssl rand -hex 32`:
 
-### Prerequisites
+   | Variable                      | Purpose                                                                                         |
+   | ----------------------------- | ----------------------------------------------------------------------------------------------- |
+   | `NAUTILUS_AUTH_SECRET`        | 32+ characters. Signs phone sessions and derives the runner key. Changing it signs phones out.  |
+   | `NAUTILUS_ADMIN_TOKEN`        | 32+ characters. The desktop's token. Paste it into the desktop's settings.                      |
+   | `NAUTILUS_OPENCODE_AUTH_JSON` | Optional. The contents of OpenCode's `auth.json`, to use a provider beyond the free Zen models. |
 
-- Node **24.15.0 or newer** and pnpm **10.28.1** (through corepack)
-- `git`, `curl`, `flock`, `setsid`, `openssl`
-- A model provider OpenCode can sign in to. A free tier with no card is fine.
-- For building the desktop app: Rust, the [Tauri 2 prerequisites](https://tauri.app) for your OS, and `openssh-client`
+4. **Deploy**, then check it:
+
+   ```bash
+   curl https://<your-app>.vercel.app/health   # {"status":"ok","runner":"asleep"} until the first request
+   ```
+
+The functions reach Vercel Sandbox with the project's OIDC token, which Vercel provides on its own. A deploy with a new runner build restarts the runner on its next wake.
+
+To get `auth.json`, run `opencode auth login` on any machine and copy `~/.local/share/opencode/auth.json`. The phone's model picker lists whatever the provider's catalog reports.
+
+## Local development
+
+You need Node **24.15.0 or newer**, pnpm **10.28.1** (through corepack) and a Postgres URL, such as a Neon branch. For building the desktop app you also need Rust and the [Tauri 2 prerequisites](https://tauri.app) for your OS.
 
 ```bash
 corepack enable
 pnpm install
-./scripts/install-opencode.sh   # Node and the pinned OpenCode build, SHA-256 checked
-```
-
-### Option A: the installer
-
-The [quick start](#quick-start) command needs none of the Node or pnpm setup above. It checks out the latest release into `~/.local/share/nautilus-runner`, saves your teamspace next to it and runs the steps in Option C for you: `deploy`, then `link`. It skips `login`, since the free OpenCode Zen models need no sign-in. Run it again to update the runner to a newer release. `NAUTILUS_VERSION` pins a release, `NAUTILUS_STUDIO_NAME` names the Studio, and `NAUTILUS_HOME` moves the checkout. It needs bash 4 or newer; on macOS, `brew install bash` and pipe it into that bash.
-
-### Option B: everything on one machine
-
-The fastest way to see it work. This starts the server, the PWA and the Tauri app together, and the first run writes a `.env.local` for you.
-
-```bash
 pnpm dev:local
 ```
 
-Local mode skips SSH and tunnels, turns off secure cookies and reaches the sync agent directly on `127.0.0.1:4100`. The phone link in the desktop app points at `http://127.0.0.1:4002`. To use a real phone on the same network, open it through the LAN preview listener.
+This starts the runner on `127.0.0.1:4000`, the web app on `:4002` and the desktop app. The first run writes a `.env.local` with fresh secrets. Add `DATABASE_URL` to it. With `NAUTILUS_RUNNER_URL` set, the web app skips the sandbox and forwards to that runner, and the relay uses the same address.
 
 To run the pieces yourself:
 
 ```bash
-pnpm dev            # turbo: server, PWA and desktop frontend
-pnpm dev:server     # the runner only, with reload
-pnpm dev:web        # the PWA only
+pnpm dev                                    # turbo: runner, PWA and desktop frontend
+pnpm dev:web                                # the PWA only
+pnpm --filter @nautilus/runner dev          # the runner only, with reload
 pnpm --filter @nautilus/desktop tauri:dev   # the real Tauri shell
 ```
 
-### Option C: the runner on a Lightning AI Studio
-
-This is the intended deployment. `scripts/deploy-lightning.sh` does all of it from the PC: it starts the Studio, exposes the two ports, uploads the working tree, installs the boot hook, builds and starts the runner, and waits for the public URL.
-
-```bash
-lightning login
-printf 'NAUTILUS_TEAMSPACE=owner/teamspace\n' > scripts/deploy-lightning.local   # ignored by Git
-./scripts/deploy-lightning.sh             # deploy, and again after every change
-./scripts/deploy-lightning.sh login       # once: sign a model provider in to the runner
-./scripts/deploy-lightning.sh link        # a QR code that opens the app on a phone and links it
-./scripts/deploy-lightning.sh status      # also: restart, logs [server|web|boot]
-```
-
-A free Studio sleeps after 10 idle minutes, and a sleeping one answers its URL with a 404. The script turns on Lightning's `auto_start` for both ports, so opening the URL wakes the Studio instead. The page waits while it boots, and the runner answers about three minutes later. Keeping it awake all the time means turning auto-sleep off, which Lightning bills as a paid Studio.
-
-The code goes to `~/nautilus-src` on the Studio, and a small `~/.lightning_studio/on_start.sh` hands each boot to the repo's own hook. A redeploy stops the runner, keeps the old tree as `~/nautilus-src.previous` and never overwrites an existing `nautilus.env`.
-
-The full steps, for doing it by hand, are in [`scripts/bootstrap-lightning.md`](./scripts/bootstrap-lightning.md). In short:
-
-**1. Create a free CPU Studio and expose only the gateway.**
-
-```bash
-python3 -m pip install --user lightning-sdk
-lightning login
-export NAUTILUS_STUDIO_NAME="nautilus"
-export NAUTILUS_TEAMSPACE="owner/teamspace"
-
-lightning studio create --name "$NAUTILUS_STUDIO_NAME" \
-  --teamspace "$NAUTILUS_TEAMSPACE" --machine CPU
-lightning studio start  --name "$NAUTILUS_STUDIO_NAME" \
-  --teamspace "$NAUTILUS_TEAMSPACE" --machine CPU
-```
-
-Expose **8080 and 8081 only**. Never expose 4000, 4001, 4002, 4096 or a project's dev port. A new port can return Lightning's 404 for about a minute.
-
-**2. Put the repo in the Studio's persistent home** and configure it:
-
-```bash
-cd /path/to/nautilus
-chmod +x scripts/*.sh .lightning_studio/on_start.sh
-umask 077
-mkdir -p "$HOME/nautilus"/{secrets,logs,run}
-
-cat > "$HOME/nautilus/secrets/nautilus.env" <<'ENV'
-NAUTILUS_PUBLIC_URL=https://<your-lightning-port-url>
-NAUTILUS_DEV_SERVER_RESTART=auto
-ENV
-chmod 600 "$HOME/nautilus/secrets/nautilus.env"
-```
-
-There is no admin token to set. On first boot the runner writes its own secret to `$HOME/nautilus/secrets/auth-secret` (mode `0600`). It signs phone sessions and preview links and never leaves the Studio. Set `NAUTILUS_AUTH_SECRET` (32 characters or more) yourself only if linked phones should survive losing that file.
-
-**3. Sign a model provider in to the runner's OpenCode.** The server starts `opencode serve` with its own `XDG_*` directories, so the credentials must go there:
-
-```bash
-XDG_DATA_HOME="$HOME/nautilus/opencode/state" \
-XDG_CONFIG_HOME="$HOME/nautilus/opencode/state/config" \
-XDG_CACHE_HOME="$HOME/nautilus/opencode/state/cache" \
-  opencode auth login
-```
-
-The phone's model picker lists whatever the provider's catalog reports.
-
-**4. Boot it.** Lightning runs `on_start.sh` at every start. Run it by hand the first time to see any failure. It builds the runner and the PWA, then starts both from their build output, and logs to `~/nautilus/logs/server.log` and `web.log`.
-
-```bash
-./scripts/install-opencode.sh
-./.lightning_studio/on_start.sh
-```
-
-Then check `https://<your-lightning-port-url>/health/ready`.
-
-**5. Connect the PC.** Set up the Lightning SSH key once. It is the PC's only credential.
-
-```bash
-lightning ssh configure --name "$NAUTILUS_STUDIO_NAME" --teamspace "$NAUTILUS_TEAMSPACE"
-```
-
-Then in the desktop app, open **Settings › Runner**, paste the public URL, press **Detect** to read the SSH user and host from `~/.ssh/config`, and press **Save and connect**. The app saves the settings only once the connection works.
-
-### Checking a deployment
-
-```bash
-curl -fsS https://<url>/health/ready          # runner and PWA both up
-./scripts/preview-url.sh demo                 # a one-time preview link
-./scripts/verify-restart.sh                   # stop and start the Studio, check recovery
-./scripts/collect-facts.sh                    # host facts for debugging
-```
-
-`verify-restart.sh` cycles the Studio and checks that no session was lost, that a session that was `running` is now `interrupted`, and that a project that was running comes back `running`, `unhealthy`, or `error` with `runner_restarted`. It is never quietly presented as active.
-
-The four-hour recycle is a separate check. Run the same script after the first natural restart and note the times.
-
-## Configuration
-
-Everything has a working default. The settings worth knowing:
-
-| Variable                         | Default                 | Meaning                                                                   |
-| -------------------------------- | ----------------------- | ------------------------------------------------------------------------- |
-| `NAUTILUS_AUTH_SECRET`           | generated on first boot | Signs phone sessions and preview links. **Set it to keep phones linked.** |
-| `NAUTILUS_PUBLIC_URL`            | derived per request     | The public origin, used in phone and preview links                        |
-| `NAUTILUS_GATEWAY_PORT`          | `8080`                  | The public listener                                                       |
-| `NAUTILUS_PREVIEW_PORT`          | _(unset)_               | Turns on the preview origin listener (the Studio uses `8081`)             |
-| `NAUTILUS_SECURE_COOKIES`        | `true`                  | Set `false` only for plain-HTTP local development                         |
-| `NAUTILUS_PROJECTS_ROOT`         | `~/nautilus/projects`   | Where the runner keeps each project                                       |
-| `NAUTILUS_DEV_PORT_RANGE`        | `3100-3199`             | Ports for project dev servers                                             |
-| `NAUTILUS_PROJECTS_FILE`         | _(unset)_               | A JSON file of projects that exist before any desktop connects            |
-| `NAUTILUS_DEV_SERVER_RESTART`    | `auto`                  | Whether boot may restart a project it found healthy                       |
-| `NAUTILUS_SYNC_MAX_FILE_BYTES`   | `10 MB`                 | Largest file a sync carries                                               |
-| `NAUTILUS_SYNC_MAX_TOTAL_BYTES`  | `100 MB`                | Largest project a sync carries                                            |
-| `NAUTILUS_SYNC_MAX_FILE_COUNT`   | `10 000`                | Most files a sync carries                                                 |
-| `NAUTILUS_OPENCODE_SANDBOX`      | _(on when available)_   | `off` runs OpenCode without its bubblewrap sandbox                        |
-| `NAUTILUS_LOG_FORMAT` / `_LEVEL` | `json` / `debug`        | `pretty` gives a readable terminal log                                    |
-
-`scripts/dev-local.sh` writes a working `.env.local` for local mode.
+The runner keeps sync within 10 MB per file, 100 MB per project and 10,000 files.
 
 ## Development
 
@@ -329,10 +194,10 @@ pnpm build
 pnpm --filter @nautilus/desktop tauri:build   # the packaged app, with the sync agent inside
 ```
 
-The tests lean on the parts where correctness is not obvious: shadow repository policy and merge semantics, transaction rollback, undoing a pull on both sides, grants and their refusals, CSRF and origin checks, gateway routing and WebSocket upgrades, restart recovery, the desktop's review flow, SSH argument building, and stream reconnection. Sync tests run against real Git repositories, not mocks, which is why the suite allows each test 20 seconds.
+The tests lean on the parts where correctness is not obvious: shadow repository policy and merge semantics, transaction rollback, undoing a pull on both sides, grants and their refusals, CSRF and origin checks, gateway sign-in and forwarding, the sync relay, restart recovery, the desktop's review flow, and stream reconnection. Sync tests run against real Git repositories, not mocks, which is why the suite allows each test 20 seconds.
 
 ```bash
-pnpm vitest run apps/server/test          # one package
+pnpm vitest run apps/runner/test          # one package
 pnpm test:watch                           # watch mode
 ```
 
@@ -345,14 +210,14 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) before sending a change.
 The Release workflow builds the installers on Linux, macOS and Windows runners and attaches them to a draft release. Each platform builds on its own runner, because the sync agent inside the app is a copy of that machine's Node.
 
 ```bash
-# 1. Set "version" in apps/desktop/package.json, e.g. 0.2.0, and commit it.
+# 1. Set "version" in apps/desktop/package.json, e.g. 1.0.1, and commit it.
 # 2. Tag that commit with the same version and push the tag:
-git tag v0.2.0 && git push origin v0.2.0
+git tag v1.0.1 && git push origin v1.0.1
 # 3. When the workflow finishes, write the summary line at the top of the
 #    draft's notes, check the files and publish it.
 ```
 
-The draft's notes come from `scripts/release-notes.sh`, which lists the new features and fixes since the previous tag, grouped by the part of Nautilus they touch, and adds the install table. Run it locally to preview a release's notes: `scripts/release-notes.sh v0.2.0`.
+The draft's notes come from `scripts/release-notes.sh`, which lists the new features and fixes since the previous tag, grouped by the part of Nautilus they touch, and adds the install table. Run it locally to preview a release's notes: `scripts/release-notes.sh v1.0.1`.
 
 The workflow refuses a tag that does not match the version. Linux ships a `.deb` and an AppImage but no `.rpm`: the app carries a whole Node runtime, and Tauri's RPM packer compresses it slowly enough to stall a build.
 
