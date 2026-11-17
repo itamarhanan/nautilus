@@ -54,9 +54,7 @@ export function appSlice(
           settingsExist: exists,
           appState,
           selectedProjectId: appState.lastProjectId ?? appState.projects.at(0)?.id ?? null,
-          route: settingsComplete(settings, services.localMode)
-            ? homeRoute
-            : { name: "settings", section: "runner" },
+          route: settingsComplete(settings) ? homeRoute : { name: "settings", section: "runner" },
           ready: true,
         });
       } catch (error) {
@@ -82,14 +80,14 @@ export function appSlice(
         })
         .then(() => get().refreshStatus())
         .catch(() => undefined);
-      if (settingsComplete(get().settings, services.localMode)) {
+      if (settingsComplete(get().settings)) {
         void services.channel.connect(get().settings).catch(() => undefined);
       }
       void get().scan();
     },
 
     saveSettings: async (candidate) => {
-      const errors = validateSettings(candidate, services.localMode);
+      const errors = validateSettings(candidate);
       if (Object.keys(errors).length > 0) return errors;
       const previous = get().settings;
       try {
@@ -101,7 +99,7 @@ export function appSlice(
             error: friendlyError(error).message,
           },
         });
-        if (settingsComplete(previous, services.localMode)) {
+        if (settingsComplete(previous)) {
           void services.channel.connect(previous).catch(() => undefined);
         }
         return "connection_failed";
@@ -116,7 +114,7 @@ export function appSlice(
 
     saveProjectRoots: async (roots) => {
       const candidate = { ...get().settings, projectRoots: roots };
-      const errors = validateSettings(candidate, services.localMode);
+      const errors = validateSettings(candidate);
       if (errors.projectRoots) return errors.projectRoots;
       if (runtime.paths) await services.saveSettings(runtime.paths, candidate);
       const changed = roots.join("\n") !== get().settings.projectRoots.join("\n");

@@ -13,16 +13,15 @@ async function readOptional(path: string): Promise<string | undefined> {
   }
 }
 
-async function writeJson(path: string, value: unknown, home: string): Promise<void> {
+async function writeJson(path: string, value: unknown, home: string, mode?: number): Promise<void> {
   await mkdir(`${home}/.nautilus`, { recursive: true }).catch(() => undefined);
-  await writeTextFile(path, `${JSON.stringify(value, null, 2)}\n`);
+  await writeTextFile(path, `${JSON.stringify(value, null, 2)}\n`, mode ? { mode } : undefined);
 }
 
 export type DesktopPaths = {
   home: string;
   config: string;
   state: string;
-  sshConfig: string;
 };
 
 export async function desktopPaths(): Promise<DesktopPaths> {
@@ -31,7 +30,6 @@ export async function desktopPaths(): Promise<DesktopPaths> {
     home,
     config: `${home}/.nautilus/config.json`,
     state: `${home}/.nautilus/state.json`,
-    sshConfig: `${home}/.ssh/config`,
   };
 }
 
@@ -48,7 +46,8 @@ export async function loadSettings(
 }
 
 export async function saveSettings(paths: DesktopPaths, settings: DesktopSettings): Promise<void> {
-  await writeJson(paths.config, settingsDocument(settings), paths.home);
+  // It holds the admin token, so only this user may read it.
+  await writeJson(paths.config, settingsDocument(settings), paths.home, 0o600);
 }
 
 export async function loadState(paths: DesktopPaths): Promise<AppState> {
@@ -63,10 +62,6 @@ export async function loadState(paths: DesktopPaths): Promise<AppState> {
 
 export async function saveState(paths: DesktopPaths, state: AppState): Promise<void> {
   await writeJson(paths.state, state, paths.home);
-}
-
-export async function readSshConfig(paths: DesktopPaths): Promise<string | undefined> {
-  return readOptional(paths.sshConfig).catch(() => undefined);
 }
 
 export const folderIo: FolderIo = {

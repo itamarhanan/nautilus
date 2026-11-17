@@ -48,11 +48,7 @@
     "externalBin": ["binaries/nautilus-sync-agent"],
     "linux": {
       "deb": {
-        "section": "devel",
-        "depends": ["openssh-client"]
-      },
-      "rpm": {
-        "depends": ["openssh-clients"]
+        "section": "devel"
       }
     }
   }

@@ -12,14 +12,13 @@ import { Tab, TabList } from "@astryxdesign/core/TabList";
 import { Heading, Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { Timestamp } from "@astryxdesign/core/Timestamp";
-import { Smartphone, Wand2 } from "lucide-react";
+import { Smartphone } from "lucide-react";
 import { BrandMark } from "../components/BrandMark";
 import { useApp } from "../context";
 import type { SettingsSection } from "../store";
-import { desktopPaths, readSshConfig } from "../lib/files";
 import { readableStatus } from "@nautilus/copy";
 import { activeDevices, plural } from "../lib/format";
-import { detectLightningHost, type DesktopSettings, type SettingsErrors } from "../lib/settings";
+import type { DesktopSettings, SettingsErrors } from "../lib/settings";
 
 declare const __APP_VERSION__: string;
 
@@ -65,7 +64,6 @@ function fieldStatus(message: string | undefined) {
 }
 
 function RunnerSettings() {
-  const localMode = useApp((state) => state.localMode);
   const saveSettings = useApp((state) => state.saveSettings);
   const connection = useApp((state) => state.connection);
   const settingsExist = useApp((state) => state.settingsExist);
@@ -74,25 +72,10 @@ function RunnerSettings() {
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
-  const [detectMessage, setDetectMessage] = useState<string | null>(null);
 
   const update = (change: (draft: DesktopSettings) => DesktopSettings) => {
     setDraft((current) => change(current));
     setSaved(false);
-  };
-
-  const detect = async () => {
-    const config = await readSshConfig(await desktopPaths()).catch(() => undefined);
-    const found = config ? detectLightningHost(config) : undefined;
-    if (found) {
-      update((current) => ({
-        ...current,
-        ssh: { ...current.ssh, host: found.host, user: found.user },
-      }));
-      setDetectMessage(`Found ${found.user}@${found.host} in ~/.ssh/config.`);
-    } else {
-      setDetectMessage("No Lightning host in ~/.ssh/config. Run `lightning ssh configure` first.");
-    }
   };
 
   const save = async () => {
@@ -119,84 +102,34 @@ function RunnerSettings() {
         {!settingsExist ? (
           <Banner
             status="info"
-            title="Connect this PC to your runner"
-            description="Nautilus reaches the runner over SSH with the key that `lightning ssh configure` created. No token or password is stored."
-          />
-        ) : null}
-        {localMode ? (
-          <Banner
-            status="info"
-            title="Local mode"
-            description="The desktop talks to a runner on this machine, so the SSH settings are ignored."
+            title="Connect this PC to your Nautilus deployment"
+            description="Enter the address of the Nautilus app on Vercel and its admin token. The token is saved in ~/.nautilus/config.json, readable only by you."
           />
         ) : null}
         <TextInput
-          label="Runner URL"
-          description="The Studio's public Nautilus port. Used for the phone link."
+          label="Nautilus URL"
+          description="The deployment on Vercel. Phones open the same address."
           value={draft.runnerUrl}
           onChange={(value) => {
             update((current) => ({ ...current, runnerUrl: value }));
           }}
-          placeholder="https://8080-01abc….cloudspaces.litng.ai"
+          placeholder="https://nautilus-example.vercel.app"
           autoComplete="off"
           status={fieldStatus(errors.runnerUrl)}
           onEnter={() => void save()}
         />
-        <div className="flex items-end gap-2">
-          <div className="min-w-0 flex-1">
-            <TextInput
-              label="SSH user"
-              description="The Studio user from `lightning ssh configure`."
-              value={draft.ssh.user}
-              onChange={(value) => {
-                update((current) => ({
-                  ...current,
-                  ssh: { ...current.ssh, user: value },
-                }));
-              }}
-              placeholder="s_01abc…"
-              autoComplete="off"
-              status={fieldStatus(errors.sshUser)}
-              onEnter={() => void save()}
-            />
-          </div>
-          <Button
-            label="Detect"
-            variant="secondary"
-            icon={<Wand2 className="size-3.5" aria-hidden />}
-            tooltip="Read the Lightning host from ~/.ssh/config"
-            onClick={() => void detect()}
-          />
-        </div>
-        {detectMessage ? <Text type="supporting">{detectMessage}</Text> : null}
-        <div className="grid grid-cols-2 gap-3">
-          <TextInput
-            label="SSH host"
-            value={draft.ssh.host}
-            onChange={(value) => {
-              update((current) => ({
-                ...current,
-                ssh: { ...current.ssh, host: value },
-              }));
-            }}
-            autoComplete="off"
-            status={fieldStatus(errors.sshHost)}
-            onEnter={() => void save()}
-          />
-          <TextInput
-            label="SSH key"
-            value={draft.ssh.keyPath}
-            onChange={(value) => {
-              update((current) => ({
-                ...current,
-                ssh: { ...current.ssh, keyPath: value },
-              }));
-            }}
-            autoComplete="off"
-            status={fieldStatus(errors.keyPath)}
-            onEnter={() => void save()}
-          />
-        </div>
+        <TextInput
+          label="Admin token"
+          description="The value of NAUTILUS_ADMIN_TOKEN in the deployment's environment."
+          value={draft.adminToken}
+          type="password"
+          onChange={(value) => {
+            update((current) => ({ ...current, adminToken: value }));
+          }}
+          autoComplete="off"
+          status={fieldStatus(errors.adminToken)}
+          onEnter={() => void save()}
+        />
         {failure ? (
           <Banner
             status="error"

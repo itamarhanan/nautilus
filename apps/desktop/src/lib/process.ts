@@ -1,6 +1,6 @@
 import { Child, Command } from "@tauri-apps/plugin-shell";
 
-export type AllowedProgram = "nautilus-ssh-control" | "nautilus-ssh-sync" | "nautilus-sync-agent";
+export type AllowedProgram = "nautilus-sync-agent";
 
 export type SpawnHandlers = {
   onStdout?: (line: string) => void;

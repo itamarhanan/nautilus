@@ -31,10 +31,10 @@ export function GetStarted() {
             title="Connect to the runner"
             description={
               connected
-                ? "Connected over SSH."
+                ? "Connected to your Nautilus deployment."
                 : connection.phase === "connecting" || connection.phase === "reconnecting"
                   ? "Connecting…"
-                  : (connection.error ?? "Enter the runner URL and the Studio's SSH user.")
+                  : (connection.error ?? "Enter the deployment's address and admin token.")
             }
             done={connected}
             action={

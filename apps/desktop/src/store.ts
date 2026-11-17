@@ -21,12 +21,8 @@ export function createDesktopStore(services: DesktopServices): StoreApi<DesktopS
       localMode: services.localMode,
       home: "",
       settings: {
-        runnerUrl: "",
-        ssh: {
-          host: "ssh.lightning.ai",
-          user: "",
-          keyPath: "~/.ssh/lightning_rsa",
-        },
+        runnerUrl: services.localMode ? "http://127.0.0.1:4002" : "",
+        adminToken: "",
         projectRoots: ["~"],
       },
       settingsExist: false,

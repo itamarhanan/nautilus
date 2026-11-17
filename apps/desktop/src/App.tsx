@@ -161,13 +161,8 @@ function useStatusPolling(
 
 export default function App() {
   const store = useMemo(() => {
-    let home = "";
     return createDesktopStore({
-      paths: async () => {
-        const paths = await desktopPaths();
-        home = paths.home;
-        return paths;
-      },
+      paths: desktopPaths,
       loadSettings,
       saveSettings,
       loadState,
@@ -180,13 +175,7 @@ export default function App() {
       alert: (title, body) => {
         void systemAlert(title, body).catch(() => undefined);
       },
-      channel: new ControlChannel({
-        spawn: tauriSpawner,
-        get home() {
-          return home;
-        },
-        localMode,
-      }),
+      channel: new ControlChannel(),
       agent: () =>
         Promise.resolve(
           new AgentProcess({

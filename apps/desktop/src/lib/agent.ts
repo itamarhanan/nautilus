@@ -2,7 +2,7 @@ import { agent as agentText } from "@nautilus/copy";
 import { AgentApi } from "./api";
 import type { RunningProcess, Spawner } from "./process";
 import type { DesktopSettings } from "./settings";
-import { localAgentPort } from "./ssh";
+export const localAgentPort = 4100;
 
 export type AgentPhase = "stopped" | "starting" | "running" | "error";
 

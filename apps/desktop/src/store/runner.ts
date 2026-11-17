@@ -5,8 +5,6 @@ import { plural } from "../lib/format";
 import type { StoreRuntime } from "./runtime";
 import { type DesktopActions, emptyStatus } from "./types";
 
-const localModeWebPort = String(import.meta.env.VITE_NAUTILUS_WEB_PORT ?? "4002");
-
 function reportExclusions({ get, set }: StoreRuntime, projectId: string, excluded: string[]): void {
   if (excluded.length === 0) return;
   const project = get().appState.projects.find((entry) => entry.id === projectId);
@@ -162,9 +160,7 @@ export function runnerSlice(
       }
       try {
         const code = await api.pairingCode();
-        const base = get().localMode
-          ? `http://127.0.0.1:${localModeWebPort}`
-          : get().settings.runnerUrl;
+        const base = get().settings.runnerUrl.replace(/\/+$/, "");
         set({
           pairing: {
             ...code,

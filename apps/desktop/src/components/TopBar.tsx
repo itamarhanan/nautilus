@@ -153,7 +153,6 @@ function ConnectionPill() {
   const connection = useApp((state) => state.connection);
   const agent = useApp((state) => state.agent);
   const settings = useApp((state) => state.settings);
-  const localMode = useApp((state) => state.localMode);
   const reconnect = useApp((state) => state.reconnect);
   const [open, setOpen] = useState(false);
   const tone = connectionTone(connection.phase, agent.phase);
@@ -172,12 +171,12 @@ function ConnectionPill() {
           <MetadataList label={{ position: "start", width: 96 }}>
             <MetadataListItem label="Runner">
               <Text type="code" wordBreak="break-all" className="select-text">
-                {localMode ? "127.0.0.1 (local mode)" : settings.runnerUrl || "Not set"}
+                {settings.runnerUrl || "Not set"}
               </Text>
             </MetadataListItem>
             <MetadataListItem label="Control">
               {connection.phase === "connected"
-                ? `Connected over SSH${connection.info ? ` · v${connection.info.version}` : ""}`
+                ? `Connected${connection.info ? ` · ${connection.info.version}` : ""}`
                 : connectionLabel(connection.phase, "running")}
             </MetadataListItem>
             <MetadataListItem label="Sync agent">{agentLabel(agent.phase)}</MetadataListItem>

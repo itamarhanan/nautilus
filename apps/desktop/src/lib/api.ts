@@ -173,8 +173,15 @@ async function requestJson<T>(
   return value as T;
 }
 
+export type RelayGrant = { url: string; token: string; expiresAt: string };
+
+// Talks to the gateway with the deployment's admin token. The gateway handles
+// phones and pairing itself and forwards the rest to the runner.
 export class ControlApi {
-  constructor(readonly baseUrl: string) {}
+  constructor(
+    readonly baseUrl: string,
+    private readonly adminToken: string,
+  ) {}
 
   info(options: RequestOptions = {}): Promise<RunnerInfo> {
     return this.request("GET", "/api/control/info", undefined, options);
@@ -238,6 +245,11 @@ export class ControlApi {
 
   async revokeDevice(deviceId: string): Promise<void> {
     await this.request("POST", `/api/devices/${encodeURIComponent(deviceId)}/revoke`);
+  }
+
+  // Wakes the runner and returns where the sync agent should poll it.
+  relay(): Promise<RelayGrant> {
+    return this.request("POST", "/api/control/relay", undefined, { timeoutMs: 120_000 });
   }
 
   async tunnelHealth(): Promise<boolean> {
@@ -310,7 +322,7 @@ export class ControlApi {
     return requestJson<T>(
       new URL(pathname, `${this.baseUrl}/`),
       method,
-      { "x-nautilus-control": "1" },
+      { authorization: `Bearer ${this.adminToken}` },
       body,
       options,
       "runner_offline",
@@ -355,6 +367,14 @@ export class AgentApi {
   compare(projectId: string, remoteHead: string, path: string): Promise<SyncFileChange> {
     const query = new URLSearchParams({ projectId, remoteHead, path });
     return this.request("GET", `/v1/compare?${query.toString()}`);
+  }
+
+  async startRelay(grant: RelayGrant): Promise<void> {
+    await this.request("POST", "/v1/relay", { url: grant.url, token: grant.token });
+  }
+
+  async stopRelay(): Promise<void> {
+    await this.request("POST", "/v1/relay/stop", {});
   }
 
   undoPull(projectId: string, requestId: string): Promise<LocalSyncStatusResponse> {

@@ -1,32 +1,20 @@
 import { ApiError } from "./api";
 
 export function friendlyError(error: unknown): Error {
-  const message = error instanceof Error ? error.message : String(error);
-  if (/permission denied/i.test(message)) {
-    return new Error(
-      "The runner rejected the SSH key. Run `lightning ssh configure` again or check the key path.",
-    );
+  if (error instanceof ApiError) {
+    if (error.status === 401) {
+      return new Error("The deployment refused the admin token. Check NAUTILUS_ADMIN_TOKEN.");
+    }
+    if (error.code === "runner_starting") {
+      return new Error("The runner is still starting. Nautilus keeps trying.");
+    }
+    if (error.code === "gateway_misconfigured") return new Error(error.message);
+    if (error.code === "runner_offline") {
+      return new Error("The Nautilus deployment is not reachable. Check the address.");
+    }
+    return error;
   }
-  if (/no such file|identity file .* not accessible/i.test(message)) {
-    return new Error("The SSH key file was not found at the configured path.");
-  }
-  if (/could not resolve|name or service not known/i.test(message)) {
-    return new Error("The SSH host name could not be resolved. Check your network.");
-  }
-  if (/host key verification failed/i.test(message)) {
-    return new Error(
-      "The runner's SSH host key changed. Check ~/.ssh/known_hosts before reconnecting.",
-    );
-  }
-  if (/did not become ready/i.test(message)) {
-    return new Error(
-      "SSH connected, but the runner's control API did not answer. Is the Studio running?",
-    );
-  }
-  if (/runner_offline|not reachable/i.test(message)) {
-    return new Error("The runner is not reachable. Is the Studio running?");
-  }
-  return error instanceof Error ? error : new Error(message);
+  return error instanceof Error ? error : new Error(String(error));
 }
 
 export function messageOf(error: unknown, fallback: string): string {
