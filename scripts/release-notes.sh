@@ -72,14 +72,9 @@ cat <<NOTES
 | macOS (Apple Silicon) | \`Nautilus_${version}_aarch64.dmg\` | Open it and drag Nautilus to Applications |
 | Windows | \`Nautilus_${version}_x64-setup.exe\` | Run it |
 
-To set up or update a runner:
+To set up the cloud side, deploy the web app to Vercel as the [README](https://github.com/itamarhanan/nautilus#deploying) describes, then paste its URL and admin token into the desktop app's settings. A redeploy updates the runner too.
 
-\`\`\`bash
-curl -fsSL https://raw.githubusercontent.com/itamarhanan/nautilus/main/scripts/install.sh | bash
-\`\`\`
-
-**Upgrading:** install the new file the same way. On Linux, \`sudo apt install nautilus-desktop\` by name will not find it, because there is no package repository; point apt at the downloaded \`.deb\` instead. Run the command above again to update the runner.
-
+**Upgrading:** install the new file the same way. On Linux, \`sudo apt install nautilus-desktop\` by name will not find it, because there is no package repository; point apt at the downloaded \`.deb\` instead.
 The builds are not signed, so macOS and Windows warn on first launch. The [README](https://github.com/itamarhanan/nautilus#install-the-desktop-app) explains how to open them.
 ${previous:+
 **Every change:** https://github.com/itamarhanan/nautilus/compare/${previous}...${tag}}
