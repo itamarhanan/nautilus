@@ -58,62 +58,7 @@ export function sessionActions(set: SetState, get: GetState): SessionActions {
         async () => {
           const isFirstPrompt = !(state.session?.events ?? []).some(isUserPrompt);
           try {
-            // Cloud-backed turn: stream the result; events are not yet
-            // mapped into the transcript, but the turn completes.
-            const res = await fetch(`/api/sessions/${encodeURIComponent(record.id)}/prompt`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ prompt, model: get().model }),
-            });
-            if (!res.ok) {
-              const body = await res.json().catch(() => ({}));
-              throw new Error(body.message ?? body.error ?? `prompt failed: ${res.status}`);
-            }
-            if (!res.body) throw new Error(`prompt failed: ${res.status}`);
-            const reader = res.body.getReader();
-            const decoder = new TextDecoder();
-            let buffer = "";
-            let sequence = (state.session?.events?.length ?? 0) + 1;
-            while (true) {
-              const { value, done } = await reader.read();
-              if (done) break;
-              buffer += decoder.decode(value, { stream: true });
-              const lines = buffer.split("\\n");
-              buffer = lines.pop() ?? "";
-              for (const line of lines) {
-                const trimmed = line.trim();
-                if (!trimmed.startsWith("data:")) continue;
-                let payload: any;
-                try {
-                  payload = JSON.parse(trimmed.slice(5).trim());
-                } catch {
-                  continue;
-                }
-                if (payload?.type === "result" && typeof payload.stdout === "string") {
-                  // Emit the agent's text as a session.delta-style event.
-                  get().actions.applyEvent({
-                    sessionId: record.id,
-                    projectId: record.projectId,
-                    sequence: sequence++,
-                    timestamp: new Date().toISOString(),
-                    type: "session.delta",
-                    durable: false,
-                    payload: { text: payload.stdout },
-                  } as any);
-                }
-                if (payload?.type === "result") {
-                  get().actions.applyEvent({
-                    sessionId: record.id,
-                    projectId: record.projectId,
-                    sequence: sequence++,
-                    timestamp: new Date().toISOString(),
-                    type: "session.completed",
-                    durable: true,
-                    payload: {},
-                  } as any);
-                }
-              }
-            }
+            await api.sendPrompt(record.id, prompt, get().model);
           } catch (error) {
             setOutgoing(record.id, null);
             throw error;
