@@ -7,7 +7,6 @@
   "scripts": {
     "dev": "turbo run dev",
     "dev:local": "./scripts/dev-local.sh",
-    "deploy:studio": "./scripts/deploy-lightning.sh",
     "dev:web": "pnpm --filter @nautilus/web dev",
     "build": "turbo run build",
     "format": "oxfmt --write .",

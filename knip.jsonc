@@ -10,8 +10,10 @@
     },
     "apps/web": {
       "ignoreFiles": ["public/**"],
+      // Listed so turbo builds the runner before the web app bundles it.
+      "ignoreDependencies": ["@nautilus/runner"],
     },
-    "apps/server": {
+    "apps/runner": {
       "ignoreDependencies": ["opencode-ai"],
     },
     "packages/brand": {

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# Runs the runner server, the PWA, and the desktop app on this machine through
-# the turbo TUI, one pane per service. The desktop starts in local mode: it
-# talks to the control API on 127.0.0.1:4001 directly instead of through SSH,
-# and it spawns the sync agent itself.
+# Runs the runner, the gateway with its PWA, and the desktop app on this machine
+# through the turbo TUI, one pane per service. The gateway forwards to the local
+# runner instead of a sandbox, and the desktop's sync agent polls that runner
+# for the relay just as it would the sandbox. The gateway still needs a
+# Postgres URL (DATABASE_URL) for phones and pairing codes.
 #
 # Pass --stream to interleave all output in one terminal instead (useful for
 # piping to a file or when no TTY is available). Extra flags go to turbo.
@@ -16,6 +17,8 @@ if [[ ! -f "${ENV_FILE}" ]]; then
   mkdir -p "$(dirname "${ENV_FILE}")"
   umask 077
   printf 'NAUTILUS_AUTH_SECRET=%q\n' "$(openssl rand -hex 32)" >"${ENV_FILE}"
+  printf 'NAUTILUS_ADMIN_TOKEN=%q\n' "$(openssl rand -hex 32)" >>"${ENV_FILE}"
+  printf 'NAUTILUS_RUNNER_KEY=%q\n' "$(openssl rand -hex 32)" >>"${ENV_FILE}"
   printf 'NAUTILUS_SECURE_COOKIES=false\n' >>"${ENV_FILE}"
   printf 'NAUTILUS_OPENCODE_STARTUP_TIMEOUT_MS=120000\n' >>"${ENV_FILE}"
   chmod 600 "${ENV_FILE}"
@@ -26,15 +29,13 @@ source "${ENV_FILE}"
 set +a
 
 export NAUTILUS_SECURE_COOKIES="${NAUTILUS_SECURE_COOKIES:-false}"
-# Without a tunnel, the runner reaches the desktop-spawned agent directly.
-export NAUTILUS_SYNC_AGENT_URL="${NAUTILUS_SYNC_AGENT_URL:-http://127.0.0.1:4100/v1/sync}"
-# `tauri dev` serves the webview from Vite, so its requests carry this origin.
-export NAUTILUS_CONTROL_ORIGINS="${NAUTILUS_CONTROL_ORIGINS:-http://localhost:1420}"
+# The runner and the gateway share this key; the gateway skips the sandbox.
+export NAUTILUS_RUNNER_KEY="${NAUTILUS_RUNNER_KEY:-$(openssl rand -hex 32)}"
+export NAUTILUS_RUNNER_URL="${NAUTILUS_RUNNER_URL:-http://127.0.0.1:4000}"
 export NAUTILUS_PROJECTS_ROOT="${NAUTILUS_PROJECTS_ROOT:-${HOME}/nautilus/dev-projects}"
 export NAUTILUS_SECRETS_PATH="${NAUTILUS_SECRETS_PATH:-${HOME}/nautilus/dev-secrets}"
+# The desktop's settings start at the local gateway on 127.0.0.1:4002.
 export VITE_NAUTILUS_LOCAL_MODE=1
-# The QR code links the phone straight at the PWA in local mode.
-export VITE_NAUTILUS_WEB_PORT="${NAUTILUS_WEB_PORT:-4002}"
 # The phone reaches the PWA over the LAN, so the preview listener has to be
 # there too. The runner links the phone to it on the host it used for the PWA,
 # and a preview token still gates every request.
@@ -64,7 +65,7 @@ printf 'Nautilus local services use environment file %s.\n' "${ENV_FILE}"
 # to every task instead of turbo's strict allowlist.
 exec pnpm exec turbo run dev:local \
   --filter=@nautilus/web \
-  --filter=@nautilus/server \
+  --filter=@nautilus/runner \
   --filter=@nautilus/desktop \
   --ui="${ui}" \
   --env-mode=loose \
