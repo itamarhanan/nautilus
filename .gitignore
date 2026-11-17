@@ -9,7 +9,6 @@ coverage/
 .env.*
 *.log
 *.tsbuildinfo
-.lightning_studio/*.local
 scripts/*.local
 .turbo
 target/
