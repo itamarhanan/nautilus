@@ -115,7 +115,7 @@ describe("settings", () => {
   it("migrates keys from older config files and writes only global settings", () => {
     const legacy = readSettings({
       runnerUrl: "https://runner.example",
-      sshHost: "ssh.lightning.ai",
+      sshHost: "ssh.example",
       sshUser: "s_old",
       sshKeyPath: "~/.ssh/id",
       credentialsPath: "~/.nautilus/credentials.json",
@@ -1581,7 +1581,7 @@ describe("desktop store", () => {
     expect(agent.start).toHaveBeenCalledTimes(1);
     expect(store.getState().review).not.toBeNull();
 
-    const next = { ...settings, runnerUrl: "https://8080-other.cloudspaces.litng.ai" };
+    const next = { ...settings, runnerUrl: "https://other.example" };
     expect(await store.getState().saveSettings(next)).toBe(null);
     await vi.waitFor(() => {
       expect(agent.start).toHaveBeenCalledTimes(2);
