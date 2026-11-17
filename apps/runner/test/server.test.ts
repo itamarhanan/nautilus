@@ -920,7 +920,7 @@ test("a configured preview origin turns a preview token into a full link", async
     authSecret: testSecret,
     projects: [project()],
     logger: new Logger(() => undefined),
-    previewOrigin: "https://8081-studio.cloudspaces.litng.ai",
+    previewOrigin: "https://8081-runner.sandbox.example",
   });
   const ports = await listen(app);
 
@@ -932,7 +932,7 @@ test("a configured preview origin turns a preview token into a full link", async
     expect(issued.status).toBe(201);
     const body = issued.body as { token: string; previewUrl: string };
     expect(body.previewUrl).toBe(
-      `https://8081-studio.cloudspaces.litng.ai/?token=${encodeURIComponent(body.token)}`,
+      `https://8081-runner.sandbox.example/?token=${encodeURIComponent(body.token)}`,
     );
   } finally {
     await app.close();
