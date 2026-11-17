@@ -53,10 +53,6 @@ export function reviewSlice(
         direction,
         control: api,
         agent,
-        settings: get().settings,
-        home: paths.home,
-        spawn: services.spawn,
-        localMode: services.localMode,
         onStep: (step) => {
           patchReview(id, { step });
         },

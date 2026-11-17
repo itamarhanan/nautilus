@@ -1,28 +1,24 @@
 import type { SyncDirection, SyncResolutions, SyncResponse } from "@nautilus/types";
 import { ApiError, type AgentApi, type ControlApi } from "./api";
-import type { Spawner } from "./process";
-import type { DesktopSettings } from "./settings";
-import { resolveHomePath, SshForward, syncArgs } from "./ssh";
 
 export type SyncSessionOptions = {
   projectId: string;
   direction: SyncDirection;
   control: ControlApi;
   agent: AgentApi;
-  settings: DesktopSettings;
-  home: string;
-  spawn: Spawner;
-
-  localMode: boolean;
   onStep?: (step: SyncStep) => void;
+  // How long to wait for the agent's first poll to reach the runner.
+  relayTimeoutMs?: number;
 };
 
 export type SyncStep = "authorizing" | "tunnel" | "reviewing" | "applying" | "closing";
 
+// One sync: a grant from the local agent, a relay the agent opens to the
+// runner, then the review and the apply, and both taken down at the end.
 export class SyncSession {
   private grantId: string | undefined;
   private grant: string | undefined;
-  private tunnel: SshForward | undefined;
+  private relaying = false;
   private closed = false;
 
   constructor(private readonly options: SyncSessionOptions) {}
@@ -33,15 +29,20 @@ export class SyncSession {
     const minted = await agent.mintGrant(projectId, direction);
     this.grant = minted.grant;
     this.grantId = minted.claims.grantId;
-    if (!this.options.localMode) {
-      this.options.onStep?.("tunnel");
-      const keyPath = resolveHomePath(this.options.settings.ssh.keyPath, this.options.home);
-      this.tunnel = new SshForward(
-        "nautilus-ssh-sync",
-        syncArgs(this.options.settings, keyPath),
-        this.options.spawn,
-      );
-      await this.tunnel.start(() => control.tunnelHealth(), 20_000);
+    this.options.onStep?.("tunnel");
+    await agent.startRelay(await control.relay());
+    this.relaying = true;
+    const deadline = Date.now() + (this.options.relayTimeoutMs ?? 30_000);
+    while (!(await control.tunnelHealth())) {
+      if (signal?.aborted) throw new ApiError("cancelled", "Cancelled", 0);
+      if (Date.now() > deadline) {
+        throw new ApiError(
+          "relay_unavailable",
+          "The sync agent could not reach the runner. Check your connection and try again.",
+          0,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
     }
     this.options.onStep?.("reviewing");
     return settle(() =>
@@ -78,7 +79,7 @@ export class SyncSession {
     this.grant = undefined;
     await Promise.all([
       grantId ? this.options.agent.revokeGrant(grantId).catch(() => undefined) : undefined,
-      this.tunnel?.stop(),
+      this.relaying ? this.options.agent.stopRelay().catch(() => undefined) : undefined,
     ]);
   }
 }
