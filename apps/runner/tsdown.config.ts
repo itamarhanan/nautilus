@@ -12,4 +12,7 @@ export default defineConfig({
   // unreadable in production.
   sourcemap: true,
   dts: false,
+  // The sandbox installs only the runner's npm dependencies, so the workspace
+  // packages are bundled in.
+  deps: { alwaysBundle: [/^@nautilus\//] },
 });

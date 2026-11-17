@@ -6,6 +6,7 @@ import { HttpError } from "../errors";
 import type { LifecycleJournal } from "../lifecycle-journal";
 import type { Logger } from "../logger";
 import type { PreviewTokens } from "../preview-tokens";
+import type { RelayHub } from "../relay";
 import type { ProjectManager } from "../project-manager";
 import { type RateLimiter, requestRateKey } from "../rate-limiter";
 import type { Registry } from "../registry";
@@ -27,6 +28,8 @@ export type AppContext = {
   sessions?: SessionService | undefined;
 
   sync?: SyncCoordinator | undefined;
+
+  relay?: RelayHub | undefined;
   limiters: {
     pairing: RateLimiter;
     prompt: RateLimiter;

@@ -94,8 +94,14 @@ export class TunnelSyncClient {
       endpoint?: string;
       timeoutMs?: number;
       maxBundleBytes?: number;
+      // The relay hands requests to the PC's agent in place of a direct fetch.
+      fetch?: typeof fetch;
     },
   ) {}
+
+  private get send(): typeof fetch {
+    return this.options.fetch ?? fetch;
+  }
 
   async request(
     operation: SyncRequest["operation"],
@@ -121,7 +127,7 @@ export class TunnelSyncClient {
       controller.abort();
     }, this.options.timeoutMs ?? 30_000);
     try {
-      const result = await fetch(this.options.endpoint ?? "http://127.0.0.1:4200/v1/sync", {
+      const result = await this.send(this.options.endpoint ?? "http://127.0.0.1:4200/v1/sync", {
         method: "POST",
         headers: {
           "content-type": "application/octet-stream",
@@ -168,7 +174,7 @@ export class TunnelSyncClient {
       controller.abort();
     }, this.options.timeoutMs ?? 30_000);
     try {
-      const result = await fetch(this.options.endpoint ?? "http://127.0.0.1:4200/v1/sync", {
+      const result = await this.send(this.options.endpoint ?? "http://127.0.0.1:4200/v1/sync", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(request),

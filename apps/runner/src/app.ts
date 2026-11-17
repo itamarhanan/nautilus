@@ -15,6 +15,7 @@ import type { OpenCodeService } from "./opencode";
 import { PreviewTokens } from "./preview-tokens";
 import { ProjectManager } from "./project-manager";
 import { RateLimiter } from "./rate-limiter";
+import type { RelayHub } from "./relay";
 import { Registry } from "./registry";
 import type { AppContext } from "./routes/context";
 import { deviceRoutes } from "./routes/devices";
@@ -49,6 +50,11 @@ export type AppOptions = {
   openCode?: OpenCodeService;
   sync?: SyncCoordinator;
   tunnelHealthUrl?: string;
+  // Behind the gateway: the shared key every request but /health and the
+  // relay must carry, and the relay the PC's agent polls during a sync.
+  runnerKey?: string | undefined;
+  relay?: RelayHub | undefined;
+  version?: string | undefined;
 };
 
 export type NautilusApp = {
@@ -220,6 +226,7 @@ export async function createNautilusApp(options: AppOptions = {}): Promise<Nauti
     previewTokens,
     sessions,
     sync,
+    relay: options.relay,
     limiters: {
       pairing: new RateLimiter(20, 60_000),
       prompt: new RateLimiter(60, 60_000),
@@ -227,7 +234,7 @@ export async function createNautilusApp(options: AppOptions = {}): Promise<Nauti
       preview: new RateLimiter(30, 60_000),
     },
     settings: {
-      version: serverVersion,
+      version: options.version ?? serverVersion,
       projectsRoot: options.projectsRoot ?? serverOptions.projectsRoot,
       devPortRange: options.devPortRange ?? serverOptions.devPortRange,
       previewOrigin: options.previewOrigin ?? serverOptions.previewOrigin,
@@ -242,8 +249,10 @@ export async function createNautilusApp(options: AppOptions = {}): Promise<Nauti
       ...sessionRoutes(context),
       ...projectRoutes(context),
       ...syncRoutes(context),
+      ...(options.relay?.routes() ?? []),
     ],
     auth,
+    options.runnerKey,
   );
   const assertControlRequest = controlGuard(serverOptions.controlOrigins);
 
@@ -302,6 +311,7 @@ export async function createNautilusApp(options: AppOptions = {}): Promise<Nauti
     handleControl,
     close: async () => {
       await lifecycle.transition("stopped");
+      options.relay?.close();
       if (sessions) await lifecycle.recordService("opencode", "stop");
       await sessions?.close();
       await projectManager.stopAll();

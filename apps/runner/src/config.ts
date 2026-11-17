@@ -155,7 +155,7 @@ export function loadServerOptions(env: NodeJS.ProcessEnv = process.env): ServerO
     host: env.HOST ?? "127.0.0.1",
     // Not the generic PORT: a dev command that starts the runner next to its
     // PWA, as nautilus's own does, hands that one to both of them.
-    port: Number(env.NAUTILUS_SERVER_PORT ?? 4000),
+    port: Number(env.NAUTILUS_PORT ?? env.NAUTILUS_SERVER_PORT ?? 4000),
     gatewayHost,
     gatewayPort: Number(env.NAUTILUS_GATEWAY_PORT ?? 8080),
     previewHost: env.NAUTILUS_PREVIEW_HOST ?? gatewayHost,

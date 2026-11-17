@@ -18,10 +18,11 @@ async function tunnelAgentReady(syncAgentUrl: string): Promise<boolean> {
 }
 
 export function healthRoutes(context: AppContext): Route[] {
-  const { lifecycle, projectManager, registry, settings } = context;
+  const { lifecycle, projectManager, registry, settings, relay } = context;
   const health = () => ({
     status: "ok",
     service: "nautilus-server",
+    version: settings.version,
     lifecycle: lifecycle.snapshot(),
     activeProject: projectManager.activeProject() ?? null,
   });
@@ -29,7 +30,7 @@ export function healthRoutes(context: AppContext): Route[] {
     {
       method: "GET",
       path: "/health",
-      access: "public",
+      access: "open",
       handle: ({ response }) => {
         sendJson(response, 200, health());
         return Promise.resolve(200);
@@ -83,7 +84,7 @@ export function healthRoutes(context: AppContext): Route[] {
       path: "/api/tunnel-health",
       access: "admin",
       handle: async ({ response }) => {
-        const ready = await tunnelAgentReady(settings.tunnelHealthUrl);
+        const ready = relay ? relay.connected() : await tunnelAgentReady(settings.tunnelHealthUrl);
         sendJson(response, ready ? 200 : 503, { ready });
         return ready ? 200 : 503;
       },

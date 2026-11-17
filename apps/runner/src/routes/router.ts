@@ -1,10 +1,13 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Auth, Principal } from "../auth";
 import { HttpError } from "../errors";
+import { gatewayPrincipal } from "../runner-access";
 
 export type Channel = "public" | "control";
 
-type Access = "public" | "device" | "admin";
+// "open" answers without any credentials, even behind the gateway, and "relay"
+// takes a relay token that the route checks itself.
+type Access = "open" | "relay" | "public" | "device" | "admin";
 
 export type RouteRequest = {
   request: IncomingMessage;
@@ -50,21 +53,29 @@ function match(routes: readonly Route[], method: string, pathname: string): Matc
   return undefined;
 }
 
+// With a runner key the runner sits behind the gateway: every route but the
+// open and relay ones needs the key, and the gateway names the caller.
 export function createRouter(
   routes: readonly Route[],
   auth: Auth,
+  runnerKey?: string,
 ): (request: IncomingMessage, response: ServerResponse, channel: Channel) => Promise<number> {
   return async (request, response, channel) => {
     const url = new URL(request.url ?? "/", "http://localhost");
     const found = match(routes, request.method ?? "GET", url.pathname);
 
     const access = found?.route.access ?? "device";
+    const unauthenticated = found !== undefined && (access === "open" || access === "relay");
     const principal: Principal | null =
       channel === "control"
         ? { kind: "admin" }
-        : access === "public" && found
+        : unauthenticated
           ? null
-          : auth.authenticate(request, response);
+          : runnerKey !== undefined
+            ? gatewayPrincipal(request, runnerKey)
+            : access === "public" && found
+              ? null
+              : auth.authenticate(request, response);
     if (!found) throw new HttpError(404, "not_found", "Route not found");
     if (access === "admin" && principal?.kind !== "admin") {
       throw new HttpError(404, "not_found", "Route not found");
