@@ -3,6 +3,7 @@ import { loadAgentConfig, type AgentConfig } from "./config";
 import type { GrantAuthority } from "./grants";
 import { maxGrantLifetimeMs } from "./grants";
 import { SyncAgent, SyncAgentError } from "./operations";
+import { RelayPoller, relayUrl } from "./relay";
 
 export { SyncAgent } from "./operations";
 export { GrantAuthority } from "./grants";
@@ -11,6 +12,7 @@ type AgentServer = {
   server: Server;
   agent: SyncAgent;
   grants: GrantAuthority;
+  relay: RelayPoller;
   close: () => Promise<void>;
 };
 
@@ -125,14 +127,21 @@ export async function createSyncAgentServer(
   agent = new SyncAgent(config, grants.authenticate),
 ): Promise<AgentServer> {
   await agent.recover();
+  const relay = new RelayPoller(`http://127.0.0.1:${String(config.port)}`);
   const server = createServer((request, response) => {
-    void handle(request, response, config, agent, grants);
+    void handle(request, response, config, agent, grants, relay);
+  });
+  server.once("listening", () => {
+    const address = server.address();
+    if (address && typeof address === "object") relay.setLocalPort(address.port);
   });
   return {
     server,
     agent,
     grants,
+    relay,
     close: async () => {
+      relay.stop();
       server.closeAllConnections();
       await new Promise<void>((resolveClose, reject) => {
         server.close((error) => {
@@ -153,8 +162,31 @@ async function handleDesktop(
   pathname: string,
   agent: SyncAgent,
   grants: GrantAuthority,
+  relay: RelayPoller,
 ): Promise<boolean> {
   const url = new URL(request.url ?? "/", "http://localhost");
+  if (request.method === "POST" && pathname === "/v1/relay") {
+    const body = await readJsonObject(request);
+    let target: string;
+    try {
+      target = relayUrl(body.url);
+    } catch {
+      sendJson(response, 400, { error: "invalid_request" });
+      return true;
+    }
+    if (typeof body.token !== "string" || body.token.length > 512) {
+      sendJson(response, 400, { error: "invalid_request" });
+      return true;
+    }
+    relay.start({ url: target, token: body.token });
+    sendJson(response, 200, { relaying: true });
+    return true;
+  }
+  if (request.method === "POST" && pathname === "/v1/relay/stop") {
+    relay.stop();
+    sendJson(response, 200, { relaying: false });
+    return true;
+  }
   if (request.method === "POST" && pathname === "/v1/grants") {
     const body = await readJsonObject(request);
     const direction = body.direction;
@@ -220,6 +252,7 @@ async function handle(
   config: AgentConfig,
   agent: SyncAgent,
   grants: GrantAuthority,
+  relay: RelayPoller,
 ): Promise<void> {
   try {
     const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
@@ -234,6 +267,8 @@ async function handle(
     if (
       pathname === "/v1/grants" ||
       pathname === "/v1/grants/revoke" ||
+      pathname === "/v1/relay" ||
+      pathname === "/v1/relay/stop" ||
       pathname === "/v1/status" ||
       pathname === "/v1/compare" ||
       pathname === "/v1/pull/undo"
@@ -242,7 +277,7 @@ async function handle(
         sendJson(response, 401, { error: "unauthorized" });
         return;
       }
-      if (await handleDesktop(request, response, pathname, agent, grants)) return;
+      if (await handleDesktop(request, response, pathname, agent, grants, relay)) return;
     }
     if (request.method !== "POST" || pathname !== "/v1/sync") {
       sendJson(response, 404, { error: "not_found" });
